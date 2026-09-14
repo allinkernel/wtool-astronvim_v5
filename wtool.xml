@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  astronvim_v5 伞项目。
+
+  它自己没有"代码"可发布——它的价值是替整棵子树负责发布：
+  在 docker 里跑 install.sh，把编译好的 nvim、锁定的 lazy 插件、mason 包
+  和生产配置打包成分卷，推到本仓的 release。
+
+  子树里另外两个项目没有 wtool.xml，由这里替它们表态：
+    astronvim_v5_config  自己有内容可推，走默认源码发布
+    nvim                 是 neovim/neovim 上游仓，我们既没权限推、也不能往里
+                         塞 wtool.xml，只能从这里声明 kind="none"
+
+  注意：本项目的"安装"由 install.sh 负责，不由 wtool 的 link/rc 机制负责。
+  原因见 install.sh 顶部注释——install.sh 必须同时能在裸容器里跑。
+-->
+<wtool schema="1" id="editor/astronvim_v5" priority="70">
+
+  <publish kind="script" script="publish.sh" tag="snapshot-%Y-%m-%d">
+
+    <!-- 目标系统矩阵。nvim 是半静态链接、只依赖 glibc，而 glibc 单向兼容：
+         在 24.04 上编的包在 22.04 上跑不起来。所以每个 target 单独出一组分卷。
+         publish.sh 会问用户要哪个。 -->
+    <target os="ubuntu" version="24.04" codename="noble"/>
+    <target os="ubuntu" version="22.04" codename="jammy"/>
+
+    <sub path="astronvim_v5_config" kind="source"/>
+    <sub path="nvim" kind="none"/>
+
+  </publish>
+
+</wtool>

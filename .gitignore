@@ -1,0 +1,10 @@
+# 这两个是**独立的 repo 项目**，nested 在本目录下，由 manifest 单独管理，
+# 不属于本仓。不 ignore 的话 git 会把它们当成 embedded repository 报错。
+/nvim/
+/astronvim_v5_config/
+
+# 本地打包产物
+/astronvim_v5-release/
+/.publish/
+*.tar.zst
+*.tar.gz
