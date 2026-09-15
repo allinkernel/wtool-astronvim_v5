@@ -269,8 +269,14 @@ install_config() {
 
 install_plugins() {
     say "装 lazy 插件（按 lazy-lock.json 钉住的版本）"
-    _lock="$CONFIG_DIR/lazy-lock.json"
-    [ -f "$_lock" ] || warn "没有 lazy-lock.json，插件版本会漂"
+    # 查**源**配置目录里的 lock，不是已经铺过去的目标目录：
+    # dry-run 下目标目录还没建，查那边会误报"没有 lazy-lock.json"
+    _lock="$HERE/astronvim_v5_config/lazy-lock.json"
+    if [ -f "$_lock" ]; then
+        step "插件 $(grep -c '"branch"' "$_lock" 2>/dev/null || echo '?') 个，版本已锁定"
+    else
+        warn "源配置里没有 lazy-lock.json，插件版本会漂"
+    fi
     if [ "$DRY_RUN" = 1 ]; then
         step "[dry-run] Lazy! restore"
     else
