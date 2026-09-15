@@ -12,6 +12,8 @@ set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 proj=$(cd -- "$here/.." && pwd)
 SH="$proj/install.sh"
+BUILD="$proj/build.sh"
+PUB="$proj/publish.sh"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
@@ -25,17 +27,33 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 
 HOSTTARGET=$(. /etc/os-release && printf '%s-%s' "$ID" "$VERSION_ID")
 
-echo "== 1. build 模式的 dry-run：只出计划，零副作用 =="
+echo "== 1. build.sh 的 dry-run：只出计划，零副作用 =="
 H="$T/h1"; mkdir -p "$H"
-# 注意：dry-run 也要用假 HOME，所以整个脚本用 env 覆盖
-env HOME="$H" "$SH" --build --no-deps --dry-run --no-shell --nvim-ref=v0.11.0 > "$T/log1" 2>&1 || {
+env HOME="$H" "$BUILD" --no-deps --dry-run --nvim-ref=v0.11.0 > "$T/log1" 2>&1 || {
     bad "dry-run 退出码非 0"; sed 's/^/     /' "$T/log1"; }
-grep -q '模式     : build' "$T/log1" && ok "认出了 build 模式" || bad "模式判定不对"
+grep -q '模式     : build' "$T/log1" && ok "build.sh 认出自己是构建" || bad "模式判定不对"
 grep -q 'cmake' "$T/log1" && ok "计划里有 cmake 编译步骤" || bad "计划里没有编译步骤"
 grep -q 'dry-run' "$T/log1" && ok "确实说了 dry-run" || bad "没说 dry-run"
 hasnt "dry-run 没有建 \$HOME/.local/bin/nvim" "$H/.local/bin/nvim"
 hasnt "dry-run 没有写 .zshrc" "$H/.zshrc"
 chk "dry-run 没写清单" "$([ -f "$H/.local/state/astronvim_v5/install-manifest.tsv" ] && echo 有 || echo 无)" "无"
+
+echo "== 1b. ★install.sh 不构建：没构建过就明确拒绝 =="
+# 这条线是这次重构的核心——install.sh 必须能在没网、没编译器的机器上跑，
+# 一旦它偷偷开始编译，这个前提就没了。
+_rc=0
+env HOME="$H" "$SH" --no-shell --no-deps > "$T/log1b" 2>&1 || _rc=$?
+chk "没构建过时拒绝安装（退出码 3）" "$_rc" "3"
+grep -q '先跑构建' "$T/log1b" && ok "告诉用户先去构建" || bad "没说怎么办"
+grep -q 'wtool build astronvim_v5' "$T/log1b" && ok "给了具体命令" || bad "没给命令"
+grep -qE 'cmake|apt-get install' "$T/log1b" && bad "install.sh 居然在编译" || ok "install.sh 里没有构建动作"
+
+echo "== 1c. publish.sh 走的是 build.sh + install.sh 两步 =="
+grep -q 'build.sh' "$PUB" && grep -q 'install.sh' "$PUB" \
+    && ok "publish.sh 两步都调" || bad "publish.sh 没有两步走"
+grep -qE '\./install\.sh --build' "$PUB" && bad "publish.sh 还在用已删除的 --build" \
+    || ok "没有残留的 install.sh --build"
+
 
 echo "== 2. 造一个发布了的分卷包 =="
 SRC="$T/src"; mkdir -p "$SRC"

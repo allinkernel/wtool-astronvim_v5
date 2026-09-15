@@ -279,7 +279,8 @@ if [ "$DRY_RUN" = 1 ]; then
     say "[dry-run] 接下来会做："
     step "docker pull $IMAGE"
     step "docker run -d --name <ctr> [--network=host] -v $WTOOL_PUBLISH_WS:/wtool:ro $IMAGE sleep infinity"
-    step "docker exec <ctr> /wtool/editor/astronvim_v5/install.sh --build --no-shell $_nvim_args"
+    step "docker exec <ctr> /wtool/editor/astronvim_v5/build.sh $_nvim_args"
+    step "docker exec <ctr> /wtool/editor/astronvim_v5/install.sh --no-shell"
     step "docker cp <ctr>:/root/... 按安装清单薅出来"
     step "分卷 $VOLUME_SIZE → $WTOOL_PUBLISH_OUT"
     exit 0
@@ -360,8 +361,11 @@ fi
 say ""
 say "在容器里安装（这一步很久：编 nvim、拉插件、装 75 个 mason 包、编 251 个 parser）"
 say "------------------------------------------------------------------------"
+# 容器里两步走：build.sh 生产（编 nvim、拉插件、装 mason、编 parser），
+# install.sh 登记和收尾（写安装清单、shell 集成）。
+# 顺序不能反，也不能合成一个脚本——install.sh 要能在没网没编译器的机器上跑。
 if ! docker exec "$CTR" bash -lc \
-        "cd /wtool/editor/astronvim_v5 && ./install.sh --build --no-shell $_nvim_args"; then
+        "cd /wtool/editor/astronvim_v5 && ./build.sh $_nvim_args && ./install.sh --no-shell"; then
     warn "容器里的 install.sh 失败了。"
     warn "用 --keep 重跑一次保住容器，然后进去看：docker exec -it $CTR bash"
     exit 1
