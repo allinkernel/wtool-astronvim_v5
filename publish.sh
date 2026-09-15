@@ -120,6 +120,15 @@ image_for_target() {
 }
 
 if [ -z "$TARGET" ]; then
+    # 没有终端还硬要问，就会把空答案当默认值用——自动化里这是"猜错了才知道"，
+    # 而猜错的代价是打出一个在目标机上跑不起来的包。宁可在这里停下。
+    if [ ! -t 0 ]; then
+        warn "stdin 不是终端，没法问你要哪个目标系统"
+        say  "请显式指定：publish.sh --target=ubuntu-24.04"
+        printf '可选：\n'
+        printf '%s\n' "$TARGETS" | awk -F'\t' 'NF {printf "  %s\n", $1}'
+        exit 2
+    fi
     echo
     say "要给哪个系统打包？（glibc 单向兼容，编出来的包只能在 >= 这个版本的机器上跑）"
     _i=0
