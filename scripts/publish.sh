@@ -14,7 +14,7 @@
 # 它做的事：
 #   1. 问你要哪个目标系统（glibc 单向兼容，一个包通吃不了）
 #   2. docker pull 对应镜像
-#   3. 起容器，把工作区**只读**挂进去，在容器里跑 install.sh
+#   3. 起容器，把工作区**只读**挂进去，在容器里跑 scripts/build.sh + scripts/install.sh
 #      —— 装到容器的 $HOME 下，不是你的 $HOME
 #   4. 按 install.sh 写的安装清单把容器的 $HOME 薅出来
 #      （清单驱动，不靠猜：猜漏一个文件，到了公司机器上是启动报错，
@@ -88,7 +88,10 @@ say "目标仓   : $WTOOL_PUBLISH_REPO"
 say "tag      : $WTOOL_PUBLISH_TAG"
 
 [ -d "$WTOOL_PUBLISH_ROOT" ] || die "项目目录不存在: $WTOOL_PUBLISH_ROOT"
-[ -f "$WTOOL_PUBLISH_ROOT/install.sh" ] || die "找不到 install.sh"
+[ -x "$WTOOL_PUBLISH_ROOT/scripts/install.sh" ] \
+    || die "找不到 scripts/install.sh（脚本都住在 scripts/ 下）"
+[ -x "$WTOOL_PUBLISH_ROOT/scripts/build.sh" ] \
+    || die "找不到 scripts/build.sh"
 [ -f "$WTOOL_PUBLISH_ROOT/astronvim_v5_config/lazy-lock.json" ] \
     || warn "配置仓里没有 lazy-lock.json，插件版本会漂"
 
@@ -445,8 +448,11 @@ rm -f -- "$OUT/$ASSET-vol"*
 
 # install.sh 和 dist.json 是给"只能浏览器下载"的机器用的：
 # 少了它们，下载回来一堆分卷没人知道怎么铺
-cp -f -- "$WTOOL_PUBLISH_ROOT/install.sh" "$OUT/install.sh"
-chmod +x -- "$OUT/install.sh"
+# 自包含包里放的就是仓库里这两份脚本（不是另写一套）：
+# 公司那台机器下完解压，跑 ./download.sh --from=. 再 ./install.sh
+cp -f -- "$WTOOL_PUBLISH_ROOT/scripts/install.sh" "$OUT/install.sh"
+cp -f -- "$WTOOL_PUBLISH_ROOT/scripts/download.sh" "$OUT/download.sh" 2>/dev/null || true
+chmod +x -- "$OUT/install.sh" "$OUT/download.sh" 2>/dev/null || true
 
 python3 - "$OUT" "$ASSET" "$TARGET" "$_comp" "$WTOOL_PUBLISH_TAG" \
         "$WTOOL_PUBLISH_DATE" "$WTOOL_PUBLISH_REPO" > "$OUT/dist.json" <<'PY'
