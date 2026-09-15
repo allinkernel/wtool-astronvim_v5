@@ -39,13 +39,17 @@ WTOOL_PUBLISH_REPO=${WTOOL_PUBLISH_REPO:-allinkernel/wtool-astronvim_v5}
 WTOOL_PUBLISH_TAG=${WTOOL_PUBLISH_TAG:-snapshot-$(date +%Y-%m-%d)}
 WTOOL_PUBLISH_DATE=${WTOOL_PUBLISH_DATE:-$(date +%Y-%m-%d)}
 
-TARGET=""
-IMAGE=""
-NVIM_REF=""
+# 引擎调脚本时不会传命令行参数，所以这几个也从环境变量兜底：
+#   WTOOL_PUBLISH_TARGET=ubuntu-24.04 wtool publish astronvim_v5
+TARGET=${WTOOL_PUBLISH_TARGET:-}
+IMAGE=${WTOOL_PUBLISH_IMAGE:-}
+NVIM_REF=${WTOOL_PUBLISH_NVIM_REF:-}
 VOLUME_SIZE=${VOLUME_SIZE:-300M}
 KEEP=0
 DRY_RUN=0
 NO_CACHE=0
+SOURCE_ONLY=0
+NETWORK=""
 
 say()  { printf 'publish: %s\n' "$*"; }
 warn() { printf 'publish: 警告: %s\n' "$*" >&2; }
@@ -63,6 +67,8 @@ while [ $# -gt 0 ]; do
         --tag=*)      WTOOL_PUBLISH_TAG=${1#--tag=} ;;
         --out=*)      WTOOL_PUBLISH_OUT=${1#--out=} ;;
         --keep)       KEEP=1 ;;
+        --source-only) SOURCE_ONLY=1 ;;
+        --network=*)  NETWORK=${1#--network=} ;;
         --no-cache)   NO_CACHE=1 ;;
         --dry-run)    DRY_RUN=1 ;;
         -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -85,10 +91,98 @@ say "tag      : $WTOOL_PUBLISH_TAG"
 [ -f "$WTOOL_PUBLISH_ROOT/astronvim_v5_config/lazy-lock.json" ] \
     || warn "配置仓里没有 lazy-lock.json，插件版本会漂"
 
+# --------------------------------------------------------------------------
+# 0.5 本项目自己的源码包
+#
+# 不管后面 docker 那步做不做，先把本仓的源码打出来。理由：伞项目自己的
+# install.sh / publish.sh / wtool.xml 都在这个仓里，缺了它，
+# "把各仓的 release 下载下来拼成工作区"这件事就拼不全——
+# 缺的恰好是串起整棵树的那一环。
+#
+# 包的结构和引擎打的一样（第一层 wtool/ + .wtool-dist 标记），
+# 这样解压出来的路径和 repo sync 一致，wtool 也认得出这个项目。
+# --------------------------------------------------------------------------
+pack_own_source() {
+    _rel=${WTOOL_PUBLISH_PROJECT:-editor/astronvim_v5}
+    _asset=$(printf '%s' "$_rel" | tr '/' '-')
+    _out="$OUT/${_asset}-${WTOOL_PUBLISH_DATE}-src.tar.gz"
+
+    say "打本项目源码包 → $(basename "$_out")"
+    if [ "$DRY_RUN" = 1 ]; then
+        step "[dry-run] git archive --prefix=wtool/$_rel/ HEAD | gzip > $_out"
+        return 0
+    fi
+
+    _commit=$(git -C "$WTOOL_PUBLISH_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+    [ -n "$_commit" ] || die "$WTOOL_PUBLISH_ROOT 不是 git 仓库，打不出源码包"
+    _dirty=false
+    [ -n "$(git -C "$WTOOL_PUBLISH_ROOT" status --porcelain 2>/dev/null)" ] && _dirty=true
+
+    # 用 git archive 而不是 tar 目录，因为本目录里**嵌套着两个独立项目**
+    # （nvim/ 和 astronvim_v5_config/，manifest 里各自是单独的 project）。
+    # tar 会把它们整个卷进来——nvim/ 一旦 repo sync 下来就是整个 neovim
+    # 源码树，伞项目的包会白白涨到几百兆，而且和别人自己的包重复。
+    # git archive 只打本仓跟踪的文件，天然把它们排除掉（.gitignore 里也列了）。
+    # 顺带：它按原样保存符号链接，不会像 tar --transform 那样改写指向。
+    _stage=$(mktemp -d "${TMPDIR:-/tmp}/astro-src.XXXXXX")
+    git -C "$WTOOL_PUBLISH_ROOT" archive --format=tar \
+        --prefix="wtool/$_rel/" HEAD > "$_stage/base.tar" || {
+        rm -rf -- "$_stage"; die "git archive 失败"
+    }
+
+    # 发布标记：解压出来的工作区靠它认人
+    mkdir -p -- "$_stage/.wtool-dist"
+    cat > "$_stage/.wtool-dist/${_asset}.json" <<EOF
+{
+  "project": "$_rel",
+  "repo": "$WTOOL_PUBLISH_REPO",
+  "commit": "$_commit",
+  "dirty": $_dirty,
+  "packed_at": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "view": "release",
+  "layout": "wtool/$_rel"
+}
+EOF
+    tar -C "$_stage" --transform='s|^|wtool/|S' --sort=name \
+        --numeric-owner --owner=0 --group=0 -rf "$_stage/base.tar" .wtool-dist \
+        || { rm -rf -- "$_stage"; die "追加发布标记失败"; }
+    gzip -6 -c "$_stage/base.tar" > "$_out" || { rm -rf -- "$_stage"; die "压缩失败"; }
+    rm -rf -- "$_stage"
+    step "$(basename "$_out")  $(($(wc -c < "$_out") / 1024))K"
+}
+
+# 源码包先打，而且要在 docker 检查和"问目标系统"之前——
+# --source-only 本来就不需要 docker，更没理由被问目标系统。
+mkdir -p -- "$WTOOL_PUBLISH_OUT"
+OUT=$(cd -- "$WTOOL_PUBLISH_OUT" && pwd)
+pack_own_source
+if [ "$SOURCE_ONLY" = 1 ]; then
+    say ""
+    say "--source-only：只出源码包，不起 docker"
+    ls -la "$OUT" | tail -n +2 | sed 's/^/  /'
+    exit 0
+fi
+
+# 分清两种情况，它们的处理完全不同：
+#   环境不具备（没装 docker / 连不上 daemon）—— 源码包已经打好了，照样交出去，
+#       并且大声说清楚缺的是什么，免得让人以为 payload 也有了
+#   跑了但坏了（编译失败、薅产物失败）—— 那是真失败，非 0 退出，别上传半成品
+# 所以这里只是 warn + 提前收工，不是 die。
 if [ "$DRY_RUN" = 0 ]; then
-    have docker || die "publish 需要 docker（起容器的机器上装一个）"
-    docker info >/dev/null 2>&1 \
-        || die "连不上 docker daemon。如果在 docker 组之外，先 newgrp docker 或者重登一次。"
+    _no_docker=""
+    have docker || _no_docker="没装 docker"
+    if [ -z "$_no_docker" ] && ! docker info >/dev/null 2>&1; then
+        _no_docker="连不上 docker daemon（在 docker 组之外？先 newgrp docker 或重登一次）"
+    fi
+    if [ -n "$_no_docker" ]; then
+        warn "$_no_docker，做不了 payload 分卷包。"
+        warn "这次只会发出本项目自己的源码包（install.sh / publish.sh / wtool.xml）。"
+        warn "装好 docker 之后用同一个 tag 重跑，就会补上分卷包。"
+        say ""
+        say "产物：$OUT"
+        ls -la "$OUT" | tail -n +2 | sed 's/^/  /'
+        exit 0
+    fi
 fi
 
 # --------------------------------------------------------------------------
@@ -184,7 +278,7 @@ if [ "$DRY_RUN" = 1 ]; then
     say ""
     say "[dry-run] 接下来会做："
     step "docker pull $IMAGE"
-    step "docker run -d --name <ctr> -v $WTOOL_PUBLISH_WS:/wtool:ro $IMAGE sleep infinity"
+    step "docker run -d --name <ctr> [--network=host] -v $WTOOL_PUBLISH_WS:/wtool:ro $IMAGE sleep infinity"
     step "docker exec <ctr> /wtool/editor/astronvim_v5/install.sh --build --no-shell $_nvim_args"
     step "docker cp <ctr>:/root/... 按安装清单薅出来"
     step "分卷 $VOLUME_SIZE → $WTOOL_PUBLISH_OUT"
@@ -212,10 +306,31 @@ trap cleanup EXIT INT TERM
 say "拉镜像 $IMAGE"
 docker pull "$IMAGE" >/dev/null || die "拉镜像失败: $IMAGE"
 
-say "起容器 $CTR"
+# 网络模式。这里有个很容易踩的坑：
+#   宿主机的代理通常是 http://127.0.0.1:7897，而 **容器里的 127.0.0.1
+#   指的是容器自己**。直接 -e HTTP_PROXY 透传，容器里所有下载都会失败，
+#   而且报的是"连接被拒绝"这种看不出根因的错。
+#   --network=host 让容器共享宿主网络命名空间，127.0.0.1 就真的是宿主了。
+if [ -z "$NETWORK" ]; then
+    NETWORK=bridge
+    for _v in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy; do
+        eval "_pv=\${$_v:-}"
+        case $_pv in
+            *127.0.0.1*|*localhost*|*"[::1]"*)
+                NETWORK=host
+                say "代理指向本机（$_pv），容器改用 --network=host（否则容器里的 127.0.0.1 是它自己）"
+                break ;;
+        esac
+    done
+fi
+_net_args=""
+[ "$NETWORK" != "bridge" ] && _net_args="--network=$NETWORK"
+
+say "起容器 $CTR（网络：$NETWORK）"
 # 工作区只读挂载：容器绝不能改你的工作区。install.sh 是树外构建，
 # 就是为了这个（cmake 默认会把 build 写在源码树里）。
-docker run -d --name "$CTR" \
+# shellcheck disable=SC2086
+docker run -d --name "$CTR" $_net_args \
     -v "$WTOOL_PUBLISH_WS:/wtool:ro" \
     -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \
     -e NO_PROXY -e no_proxy -e ALL_PROXY -e all_proxy \
