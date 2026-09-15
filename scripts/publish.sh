@@ -344,6 +344,8 @@ docker run -d --name "$CTR" $_net_args \
     die "起容器失败"
 }
 
+# 注：safe.directory 不在这里设 —— 此刻容器里还没装 git（镜像是干净的），
+# 设了必然静默失败。build.sh 会在装完依赖之后自己设一次。
 _proxy_note=""
 for _v in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
     eval "_pv=\${$_v:-}"

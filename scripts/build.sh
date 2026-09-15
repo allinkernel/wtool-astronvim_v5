@@ -154,6 +154,8 @@ install_deps() {
             if [ "$_try" -lt 2 ]; then
                 warn "这批没装上，10 秒后重试: $*"
                 sleep 10
+                _apt_switched=0          # 允许这次重试时换源
+                _apt_prepare >/dev/null 2>&1 || true
             fi
         done
         warn "这批最终没装上（继续，但后面可能出错）: $*"
@@ -162,10 +164,38 @@ install_deps() {
         return 0
     }
 
-    if [ "$DRY_RUN" = 0 ]; then
+    # 换源退路：宿主代理走 archive.ubuntu.com / security.ubuntu.com 经常 502
+    # （实测只有 171 kB/s，还会整批失败）。第一轮失败就换国内镜像重来。
+    _apt_mirror=${WTOOL_APT_MIRROR:-http://mirrors.ustc.edu.cn/ubuntu}
+    _apt_prepare() {
+        if [ "$DRY_RUN" = 1 ]; then return 0; fi
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 || warn "apt-get update 失败（继续，可能用不了）"
-    fi
+        apt-get update -qq >/dev/null 2>&1 && return 0
+        [ "$_apt_switched" = 1 ] && return 1
+        warn "apt 源不可用，换成 $_apt_mirror 重试"
+        _apt_switched=1
+        . /etc/os-release 2>/dev/null || true
+        mkdir -p /etc/apt/sources.list.d
+        cat > /etc/apt/sources.list.d/wtool-mirror.sources <<EOF
+Types: deb
+URIs: $_apt_mirror/
+Suites: ${VERSION_CODENAME} ${VERSION_CODENAME}-updates ${VERSION_CODENAME}-backports ${VERSION_CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+        # 镜像自带的是 ubuntu.sources（不是 .list），必须一起删 ——
+        # 只删 .list 的话那个 502 的源还挂着，update 照样失败
+        for _f in /etc/apt/sources.list.d/*; do
+            case $_f in
+                */wtool-mirror.sources) ;;
+                *) rm -f -- "$_f" 2>/dev/null || true ;;
+            esac
+        done
+        rm -f /etc/apt/sources.list 2>/dev/null || true
+        apt-get update -qq >/dev/null 2>&1
+    }
+    _apt_switched=0
+    _apt_prepare || warn "apt-get update 失败（继续，可能用不了）"
 
     # 编译 nvim 本身
     _apt build-essential cmake ninja-build gettext pkg-config \
@@ -221,28 +251,48 @@ build_nvim() {
 
     # 树外构建。publish.sh 是把工作区**只读**挂进容器的，cmake 默认把 build
     # 目录写在源码树里（$_src/build），只读挂载下必然失败。
+    # nvim 的构建**必须先编它的 cmake.deps**（会联网拉 luajit/libuv/msgpack…）。
+    # 直接 `cmake -S . -B build` 会报 "Failed to find a Lua 5.1-compatible
+    # interpreter" —— 这个错我踩过两次，第一次只修了自己的测量脚本，
+    # 没回头修这里。用 nvim 自己的 Makefile 最稳，它会把 deps 那一步带上。
+    #
+    # 而且工作区是**只读挂载**的，make 会往源码树里写 .deps/ 和 build/，
+    # 所以先把源码复制到可写的地方。
+    _bld_src=$HOME_DIR/.cache/astronvim_v5/nvim-src
     _bld=${NVIM_BUILD_DIR:-$HOME_DIR/.cache/astronvim_v5/nvim-build}
 
     if [ "$DRY_RUN" = 1 ]; then
-        # dry-run 只描述计划：源码还没落盘是正常的，别在这里判存在性
-        step "[dry-run] cmake -S $_src -B $_bld -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX"
-        step "[dry-run] cmake --build $_bld -j$JOBS && cmake --install $_bld"
+        step "[dry-run] cp -a $_src $_bld_src   # 源码树是只读挂载，复制出来才能编"
+        step "[dry-run] make -C $_bld_src -j$JOBS CMAKE_BUILD_TYPE=Release CMAKE_EXTRA_FLAGS=-DCMAKE_INSTALL_PREFIX=$PREFIX"
+        step "[dry-run] make -C $_bld_src install"
         step "[dry-run] 之后记入清单: .local/bin/nvim .local/share/nvim"
         return 0
     fi
 
     [ -d "$_src" ] || die "nvim 源码目录不存在: $_src"
+    # 容器里是 root、源码在只读挂载上属于别人，git 会以"属主不一致"拒绝。
+    # 拿版本号前先放行（container-shell.sh 里也是这么干的）。
+    git config --global --add safe.directory '*' 2>/dev/null || true
     _ref=$(git -C "$_src" rev-parse HEAD 2>/dev/null || echo unknown)
     say "编译 nvim（源码 $_src @ $(printf '%s' "$_ref" | cut -c1-10)，-j$JOBS）"
 
     have cmake || die "没有 cmake，装不了 nvim"
-    mkdir -p -- "$_bld"
-    cmake -S "$_src" -B "$_bld" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        >/dev/null || die "cmake 配置失败"
-    cmake --build "$_bld" -j "$JOBS" >/dev/null || die "nvim 编译失败"
-    cmake --install "$_bld" >/dev/null || die "nvim 安装失败"
+    _src_real=$(cd -- "$_src" && pwd)
+    case $_src_real in
+        "$_bld_src") ;;
+        *)  say "  复制源码到可写位置: $_bld_src"
+            rm -rf -- "$_bld_src"
+            mkdir -p -- "$(dirname -- "$_bld_src")"
+            cp -a -- "$_src_real" "$_bld_src" || die "复制源码失败"
+            ;;
+    esac
+    _bld=$_bld_src/build
+
+    have make || die "没有 make，装不了 nvim"
+    ( cd -- "$_bld_src" && make -j"$JOBS" CMAKE_BUILD_TYPE=Release \
+        CMAKE_EXTRA_FLAGS="-DCMAKE_INSTALL_PREFIX=$PREFIX" ) >/dev/null \
+        || die "nvim 编译失败"
+    ( cd -- "$_bld_src" && make install ) >/dev/null || die "nvim 安装失败"
 
     manifest_add payload ".local/bin/nvim"
     [ -d "$XDG_DATA/nvim" ] && manifest_add payload ".local/share/nvim"
