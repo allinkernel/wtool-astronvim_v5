@@ -160,10 +160,34 @@ install_deps() {
 
     # 分批发，每批一个用途：一批装不上不会拖垮后面的
     # DEBIAN_FRONTEND=noninteractive 是必须的，否则 debconf 在容器里会挂死
+    #
+    # 两个细节都是踩过坑才加的：
+    #   * 重试一次。代理后面网络抖一下很常见，实测有一批整个失败、
+    #     紧接着手工跑同样的命令却一次成功。
+    #   * 失败时必须把 apt 的输出露出来。原来 >/dev/null 2>&1 吞掉错误，
+    #     只留一句"这批没装上"，只能靠猜——白白浪费一轮几十分钟的构建。
+    #   * DPkg::Lock::Timeout：并发或上一批的触发器还没收尾时，
+    #     让 apt 等锁而不是直接报失败。
     _apt() {
         if [ "$DRY_RUN" = 1 ]; then step "[dry-run] apt-get install $*"; return 0; fi
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" \
-            >/dev/null 2>&1 || warn "这批没装上（继续）: $*"
+        _aptlog="$STATE_DIR/.apt.log"
+        _try=0
+        while [ "$_try" -lt 2 ]; do
+            _try=$((_try + 1))
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                    --no-install-recommends -o DPkg::Lock::Timeout=120 "$@" \
+                    >"$_aptlog" 2>&1; then
+                return 0
+            fi
+            if [ "$_try" -lt 2 ]; then
+                warn "这批没装上，10 秒后重试: $*"
+                sleep 10
+            fi
+        done
+        warn "这批最终没装上（继续，但后面可能出错）: $*"
+        warn "apt 最后的输出："
+        tail -15 "$_aptlog" 2>/dev/null | sed 's/^/    /' >&2
+        return 0
     }
 
     if [ "$DRY_RUN" = 0 ]; then
