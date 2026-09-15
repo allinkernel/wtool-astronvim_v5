@@ -28,12 +28,13 @@
 # 这就是"目标系统"必须问出来的原因。
 set -eu
 
-HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)          # = <项目>/scripts
+PROJECT_DIR=$(cd -- "$HERE/.." && pwd)             # = <项目>
 
 # 默认值：脱开 wtool 也能直接跑
 WTOOL_PUBLISH_PROJECT=${WTOOL_PUBLISH_PROJECT:-editor/astronvim_v5}
 WTOOL_PUBLISH_ROOT=${WTOOL_PUBLISH_ROOT:-$HERE}
-WTOOL_PUBLISH_WS=${WTOOL_PUBLISH_WS:-$(cd -- "$HERE/../.." && pwd)}
+WTOOL_PUBLISH_WS=${WTOOL_PUBLISH_WS:-$(cd -- "$PROJECT_DIR/../.." && pwd)}
 WTOOL_PUBLISH_OUT=${WTOOL_PUBLISH_OUT:-${TMPDIR:-/tmp}/astronvim_v5-release}
 WTOOL_PUBLISH_REPO=${WTOOL_PUBLISH_REPO:-allinkernel/wtool-astronvim_v5}
 WTOOL_PUBLISH_TAG=${WTOOL_PUBLISH_TAG:-snapshot-$(date +%Y-%m-%d)}
@@ -279,8 +280,8 @@ if [ "$DRY_RUN" = 1 ]; then
     say "[dry-run] 接下来会做："
     step "docker pull $IMAGE"
     step "docker run -d --name <ctr> [--network=host] -v $WTOOL_PUBLISH_WS:/wtool:ro $IMAGE sleep infinity"
-    step "docker exec <ctr> /wtool/editor/astronvim_v5/build.sh $_nvim_args"
-    step "docker exec <ctr> /wtool/editor/astronvim_v5/install.sh --no-shell"
+    step "docker exec <ctr> /wtool/editor/astronvim_v5/scripts/build.sh $_nvim_args"
+    step "docker exec <ctr> /wtool/editor/astronvim_v5/scripts/install.sh --no-shell"
     step "docker cp <ctr>:/root/... 按安装清单薅出来"
     step "分卷 $VOLUME_SIZE → $WTOOL_PUBLISH_OUT"
     exit 0
@@ -365,7 +366,7 @@ say "------------------------------------------------------------------------"
 # install.sh 登记和收尾（写安装清单、shell 集成）。
 # 顺序不能反，也不能合成一个脚本——install.sh 要能在没网没编译器的机器上跑。
 if ! docker exec "$CTR" bash -lc \
-        "cd /wtool/editor/astronvim_v5 && ./build.sh $_nvim_args && ./install.sh --no-shell"; then
+        "cd /wtool/editor/astronvim_v5 && ./scripts/build.sh $_nvim_args && ./scripts/install.sh --no-shell"; then
     warn "容器里的 install.sh 失败了。"
     warn "用 --keep 重跑一次保住容器，然后进去看：docker exec -it $CTR bash"
     exit 1

@@ -11,9 +11,9 @@ set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 proj=$(cd -- "$here/.." && pwd)
-SH="$proj/install.sh"
-BUILD="$proj/build.sh"
-PUB="$proj/publish.sh"
+SH="$proj/scripts/install.sh"
+BUILD="$proj/scripts/build.sh"
+PUB="$proj/scripts/publish.sh"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
@@ -51,7 +51,7 @@ grep -qE 'cmake|apt-get install' "$T/log1b" && bad "install.sh 居然在编译" 
 echo "== 1c. publish.sh 走的是 build.sh + install.sh 两步 =="
 grep -q 'build.sh' "$PUB" && grep -q 'install.sh' "$PUB" \
     && ok "publish.sh 两步都调" || bad "publish.sh 没有两步走"
-grep -qE '\./install\.sh --build' "$PUB" && bad "publish.sh 还在用已删除的 --build" \
+grep -qE '\./scripts/install\.sh --build' "$PUB" && bad "publish.sh 还在用已删除的 --build" \
     || ok "没有残留的 install.sh --build"
 
 

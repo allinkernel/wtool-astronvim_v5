@@ -15,13 +15,14 @@
 # 由 `wtool build astronvim_v5` 调用，也可以直接跑。容器里也是它。
 #
 # 用法：
-#   build.sh [--nvim-src=DIR] [--nvim-ref=REF] [--build-dir=DIR]
+#   scripts/build.sh [--nvim-src=DIR] [--nvim-ref=REF] [--build-dir=DIR]
 #            [--prefix=DIR] [--jobs=N] [--no-deps] [--dry-run]
 set -eu
 
 APPNAME=astronvim_v5
 SELF=$(readlink -f -- "$0" 2>/dev/null || echo "$0")
-HERE=$(dirname -- "$SELF")
+HERE=$(dirname -- "$SELF")                 # = <项目>/scripts
+PROJECT_DIR=$(cd -- "$HERE/.." && pwd)    # = <项目>
 
 
 # --------------------------------------------------------------------------
@@ -196,8 +197,8 @@ build_nvim() {
     _src=$NVIM_SRC
     if [ -z "$_src" ]; then
         # 默认找同级目录下的 nvim（repo sync 出来的位置）
-        if [ -d "$HERE/nvim" ] && [ -n "$(ls -A "$HERE/nvim" 2>/dev/null)" ]; then
-            _src=$HERE/nvim
+        if [ -d "$PROJECT_DIR/nvim" ] && [ -n "$(ls -A "$PROJECT_DIR/nvim" 2>/dev/null)" ]; then
+            _src=$PROJECT_DIR/nvim
         fi
     fi
 
@@ -254,7 +255,7 @@ build_nvim() {
 # --------------------------------------------------------------------------
 install_config() {
     say "铺配置到 $CONFIG_DIR"
-    _src="$HERE/astronvim_v5_config"
+    _src="$PROJECT_DIR/astronvim_v5_config"
     [ -d "$_src" ] || die "找不到配置目录: $_src（应该是本仓的子目录）"
     if [ "$DRY_RUN" = 1 ]; then step "[dry-run] 复制 $_src → $CONFIG_DIR"; return 0; fi
     mkdir -p -- "$CONFIG_DIR"
@@ -269,7 +270,7 @@ install_plugins() {
     say "装 lazy 插件（按 lazy-lock.json 钉住的版本）"
     # 查**源**配置目录里的 lock，不是已经铺过去的目标目录：
     # dry-run 下目标目录还没建，查那边会误报"没有 lazy-lock.json"
-    _lock="$HERE/astronvim_v5_config/lazy-lock.json"
+    _lock="$PROJECT_DIR/astronvim_v5_config/lazy-lock.json"
     if [ -f "$_lock" ]; then
         step "插件 $(grep -c '"branch"' "$_lock" 2>/dev/null || echo '?') 个，版本已锁定"
     else
@@ -293,7 +294,7 @@ install_plugins() {
 # --------------------------------------------------------------------------
 install_mason() {
     say "装 mason 包（清单 mason-packages.txt；mason 不支持锁版本）"
-    _list="$HERE/mason-packages.txt"
+    _list="$PROJECT_DIR/mason-packages.txt"
     if [ ! -f "$_list" ]; then warn "没有 mason-packages.txt，跳过"; return 0; fi
 
     _names=$(grep -v '^#' "$_list" | grep -v '^$' | tr '\n' ' ')
@@ -345,7 +346,7 @@ LUA
 # --------------------------------------------------------------------------
 install_treesitter() {
     say "编译 treesitter parser（251 个，最耗时的一步）"
-    _list="$HERE/treesitter-parsers.txt"
+    _list="$PROJECT_DIR/treesitter-parsers.txt"
     if [ ! -f "$_list" ]; then warn "没有 treesitter-parsers.txt，跳过"; return 0; fi
     _names=$(grep -v '^#' "$_list" | grep -v '^$' | tr '\n' ' ')
 
@@ -402,7 +403,7 @@ main() {
 
     say ""
     say "构建完成。下一步：wtool install astronvim_v5"
-    say "（或直接跑 $(dirname -- "$SELF")/install.sh）"
+    say "（或直接跑 "$HERE/install.sh"）"
 }
 
 main

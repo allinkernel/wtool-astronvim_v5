@@ -19,13 +19,14 @@
 # 注意本脚本**不会**再回头调 wtool —— 那会变成无限递归。
 #
 # 用法：
-#   install.sh [--deploy|--local] [--target=ubuntu-24.04] [--from=DIR]
+#   scripts/install.sh [--deploy|--local] [--target=ubuntu-24.04] [--from=DIR]
 #              [--no-shell] [--no-deps] [--dry-run] [--uninstall]
 set -eu
 
 APPNAME=astronvim_v5
 SELF=$(readlink -f -- "$0" 2>/dev/null || echo "$0")
-HERE=$(dirname -- "$SELF")
+HERE=$(dirname -- "$SELF")                 # = <项目>/scripts
+PROJECT_DIR=$(cd -- "$HERE/.." && pwd)    # = <项目>
 
 
 # --------------------------------------------------------------------------
@@ -42,7 +43,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --------------------------------------------------------------------------
 MODE=""
 TARGET=""
-FROM="$HERE"
+FROM="$PROJECT_DIR"
 PREFIX=""
 NO_SHELL=0
 NO_DEPS=0
@@ -225,7 +226,7 @@ require_build() {
         warn "还没构建过（缺:$_missing）"
         warn "先跑构建，再回来装："
         warn "    wtool build astronvim_v5"
-        warn "  或者直接：$(dirname -- "$SELF")/build.sh"
+        warn "  或者直接："$HERE/build.sh""
         exit 3
     fi
     _nv=$("$PREFIX/bin/nvim" --version 2>/dev/null | head -1 || echo '?')
