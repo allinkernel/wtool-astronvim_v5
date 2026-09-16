@@ -201,6 +201,27 @@ install_deps() {
         _apt_switched=1
         . /etc/os-release 2>/dev/null || true
         mkdir -p /etc/apt/sources.list.d
+
+        # 关键：让 apt 访问国内镜像时**不要走代理**。
+        # 容器里 HTTP_PROXY 是设着的，apt 默认对所有 http 都走它 ——
+        # 于是请求 mirrors.ustc.edu.cn 也被塞进 127.0.0.1:7897，
+        # 实测报 `502 Bad Gateway [IP: 127.0.0.1 7897]`。
+        # 国内镜像本来就是直连最快，绕代理只会又慢又容易断。
+        # no_proxy 里要放主机名（IP 是 127.0.0.1 那种，跟镜像无关）。
+        _mhost=$(printf '%s' "$_apt_mirror" | sed -e 's|^[a-z]*://||' -e 's|/.*$||')
+        if [ -n "$_mhost" ]; then
+            for _v in no_proxy NO_PROXY; do
+                eval "_cur=\${$_v:-}"
+                case ",$_cur," in
+                    *",$_mhost,"*) ;;
+                    *) export "$_v=${_cur:+$_cur,}$_mhost" ;;
+                esac
+            done
+            # apt 自己也认这个配置，双保险（apt 对 no_proxy 的处理各版本不一）
+            mkdir -p /etc/apt/apt.conf.d
+            printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$_mhost" \
+                > /etc/apt/apt.conf.d/99wtool-noproxy
+        fi
         # 用**老的一行式格式**，不要 deb822 的 .sources ——
         # Ubuntu 20.04 的 apt 是 2.0，不认 deb822（那是 22.04 / apt 2.4 才有的）。
         # 一行式在所有版本上都能读。
