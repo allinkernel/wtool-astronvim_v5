@@ -133,7 +133,9 @@ fetch() {
         if [ "$_nop" = 0 ] \
            && [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
             _nop=1
-            warn "取不到 $(basename -- "$_url")，绕开代理重试"
+            # 提示里用 ${_disp:-basename}：走 API 时 URL 尾部是资产 **id**，
+            # 报"取不到 99"没人看得懂是哪个文件。
+            warn "取不到 ${_disp:-$(basename -- "$_url")}，绕开代理重试"
             # shellcheck disable=SC2086
             if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy \
                    -u ALL_PROXY -u all_proxy \
@@ -192,6 +194,7 @@ asset_id() {
 # 不能把跳转后的地址存下来复用。
 get_asset() {
     _name=$1; _out=$2
+    _disp=$_name
     _id=$(asset_id "$_name")
     if [ -n "$_id" ]; then
         fetch "https://api.github.com/repos/$REPO/releases/assets/$_id" "$_out" \
@@ -227,46 +230,213 @@ _nvol=$(awk 'END{print NR}' "$CACHE/.vols.tsv")
 say "分卷   : $_nvol 个（来自 dist.json）"
 
 # --------------------------------------------------------------------------
-# 3. 逐个下载 + 校验。
+# 3. 下载 + 校验。
+#
 #    每个卷单独重试，**不是整包重来** —— 分卷的意义就在这里：
 #    网断在第 12 个卷，只需要重下第 12 个。
+#
+#    默认**并行 3 个**。为什么要并行：实测这条链路单连接只有 20~50 KB/s，
+#    瓶颈多半在**单连接的吞吐**而不是总带宽（同样的网络，上传能跑到
+#    237 KB/s）。多开几条常常能快好几倍。
+#    串行的话设 WTOOL_DL_JOBS=1。
 # --------------------------------------------------------------------------
-while IFS='	' read -r _name _sha _bytes; do
-    [ -n "$_name" ] || continue
-    if [ -f "$_name" ] && [ "$(sha256sum "$_name" | cut -d' ' -f1)" = "$_sha" ]; then
-        say "  已有 $_name（校验通过）"
-        continue
-    fi
+JOBS=${WTOOL_DL_JOBS:-3}
+case $JOBS in ''|*[!0-9]*) JOBS=3 ;; esac
+[ "$JOBS" -lt 1 ] && JOBS=1
+[ "$JOBS" -gt 8 ] && JOBS=8
+
+# 下载单个卷，直到 sha256 校验通过。成功 0，试满 8 次失败 1。
+#
+# 这个函数会被丢进**后台子 shell**，所以它不能改父 shell 的任何变量 ——
+# 结果只能靠"退出码 + 磁盘上的文件"传递。日志写进 $_log，由父 shell 按需展示。
+dl_one() {
+    _name=$1; _sha=$2; _log=$3; _want=$4
+    _out="$CACHE/$_name"
     _try=0
     while :; do
         _try=$((_try + 1))
-        if get_asset "$_name" "$CACHE/$_name"; then
-            _got=$(sha256sum "$_name" 2>/dev/null | cut -d' ' -f1)
-            # 下全了才可能校验通过。网断时 curl 会留下一个**截断的文件**，
-            # 不校验的话后面解压会报一句莫名其妙的 tar 错误。
-            [ "$_got" = "$_sha" ] && { say "  ok $_name"; break; }
+        # 开工前的健全性检查：本地这份**不可能是"没下完"**的话，先删掉。
+        #
+        # 踩过：把一个卷改坏（比正常文件还大几个字节）之后再跑，
+        # 脚本认出了它坏、也去重下了，但**修不好** —— 因为 curl -C -
+        # 对一个比源文件还大的文件续传时，服务器回 416（Range Not
+        # Satisfiable），而被归成"下载中断、保留断点"，于是拿着同一个
+        # 坏文件重试 8 次，每次都撞 416，最后报"校验不过"。
+        #
+        # 判据很简单：大小已经 >= 期望值，就不可能是"下了一半"——
+        # 要么是完整的但内容不对，要么是坏的。两种情况都只能删了重来。
+        if [ -n "${_want:-}" ] && [ "$_want" -gt 0 ] 2>/dev/null && [ -f "$_out" ]; then
+            _sz=$(stat -c%s "$_out" 2>/dev/null || echo 0)
+            if [ "$_sz" -ge "$_want" ]; then
+                echo "本地这份 $_sz 字节 >= 期望 $_want 字节，续传没有意义，删掉重下" >>"$_log"
+                rm -f -- "$_out"
+            fi
+        fi
+        # stderr 指向日志文件时，fetch 里的 [ -t 2 ] 为假 → 不打进度条。
+        # 并行时几个进度条会互相盖，所以并行下由父 shell 显示一条汇总。
+        if get_asset "$_name" "$_out" >>"$_log" 2>&1; then
+            _got=$(sha256sum "$_out" 2>/dev/null | cut -d' ' -f1)
+            [ "$_got" = "$_sha" ] && { echo "第 $_try 次完成" >>"$_log"; return 0; }
             # 校验不过说明这份**内容不对**（不是没下完），断点续传接下去
             # 只会越接越错 —— 必须删掉重下。
-            warn "  $_name 校验不过（第 $_try 次），删掉重下"
-            rm -f -- "$_name"
+            echo "校验不过（第 $_try 次），删掉重下" >>"$_log"
+            rm -f -- "$_out"
         else
-            # 下载**中途失败**时**不要删**：文件是截断的，但前面那些字节
-            # 是对的，下一次 curl -C - 能接着传。删了就等于每次断线都从头再来，
-            # 而这条链路只有 200 多 KB/s、每几分钟断一次 —— 那样永远传不完。
-            warn "  $_name 下载中断（第 $_try 次），保留断点，稍后续传"
+            # 下载**中途失败**时**不要删**：文件是截断的，但前面的字节是对的，
+            # 下一次 curl -C - 能接着传。删了就等于每次断线都从头再来。
+            echo "下载中断（第 $_try 次），保留断点，稍后续传" >>"$_log"
         fi
-        [ "$_try" -ge 8 ] && die "$_name 试了 8 次都不行，放弃（网络太差？）"
+        [ "$_try" -ge 8 ] && return 1
         sleep 10
     done
+}
+
+# ── 3a. 先挑出哪些已经有了，剩下的排进队列 ──
+# 消息带 [序号/总数]，让人一眼知道进行到哪了 ——
+# 原来只说"已有 xxx"，在一个 16 个卷的循环里看不出进度。
+_pids=""
+# Ctrl-C 时把还在跑的 curl 一起收掉。
+# 不然它们会变成孤儿继续占着连接，下次跑脚本还得跟它们抢。
+_dl_children=""
+_dl_cleanup() {
+    for _p in $_pids $_dl_children; do
+        kill "$_p" 2>/dev/null || true
+    done
+}
+trap '_dl_cleanup' INT TERM
+
+_idx=0
+: > "$CACHE/.todo.tsv"
+while IFS='	' read -r _name _sha _bytes; do
+    [ -n "$_name" ] || continue
+    _idx=$((_idx + 1))
+    if [ -f "$CACHE/$_name" ] \
+       && [ "$(sha256sum "$CACHE/$_name" | cut -d' ' -f1)" = "$_sha" ]; then
+        say "  [$_idx/$_nvol] $_name 已有（校验通过）"
+        continue
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$_idx" "$_name" "$_sha" "$_bytes" >> "$CACHE/.todo.tsv"
 done < "$CACHE/.vols.tsv"
+
+if [ ! -s "$CACHE/.todo.tsv" ]; then
+    say "  全部 $_nvol 个卷都已在本地，无需下载"
+else
+    _need=$(awk 'END{print NR}' "$CACHE/.todo.tsv")
+    _mb=$(awk -F'\t' 'NR==FNR{b[$1]=$3;next}{t+=b[$2]}END{printf "%.0f", t/1048576}' \
+          "$CACHE/.vols.tsv" "$CACHE/.todo.tsv")
+    say "  待下载 $_need 个卷（约 ${_mb}MB），并发 $JOBS"
+
+    _launch() {
+        _i=$1; _n=$2; _s=$3; _b=$4
+        say "  [$_i/$_nvol] $_n 开始下载"
+        dl_one "$_n" "$_s" "$CACHE/.log.$_n" "$_b" &
+        _pid=$!
+        # 记下 pid → 卷名，收割时才知道是哪个卷结束了
+        printf '%s' "$_n" > "$CACHE/.pid.$_pid"
+        _pids="$_pids $_pid"
+    }
+
+    # 已经下到本地的字节数（用于汇总进度）
+    _bytes_now() {
+        # 第 2 列才是卷名（第 1 列是序号，第 3 列 sha，第 4 列字节数）
+        awk -F'\t' '{print $2}' "$CACHE/.todo.tsv" 2>/dev/null | while read -r _n; do
+            stat -c%s "$CACHE/$_n" 2>/dev/null || echo 0
+        done | awk '{s+=$1} END{print s+0}'
+    }
+    _total=$(awk -F'\t' 'NR==FNR{b[$1]=$3;next}{t+=b[$2]}END{print t+0}' \
+             "$CACHE/.vols.tsv" "$CACHE/.todo.tsv")
+
+    _ok=0; _bad=0
+    while :; do
+        # 补满并发
+        while [ "$(printf '%s' "$_pids" | wc -w)" -lt "$JOBS" ]; do
+            _line=$(awk 'NR==1' "$CACHE/.todo.tsv")
+            [ -n "$_line" ] || break
+            # 从队列里摘掉这一行
+            awk 'NR>1' "$CACHE/.todo.tsv" > "$CACHE/.todo.next" \
+                && mv -f "$CACHE/.todo.next" "$CACHE/.todo.tsv"
+            _i=$(printf '%s' "$_line" | cut -f1)
+            _n=$(printf '%s' "$_line" | cut -f2)
+            _s=$(printf '%s' "$_line" | cut -f3)
+            _b=$(printf '%s' "$_line" | cut -f4)
+            _launch "$_i" "$_n" "$_s" "$_b"
+        done
+
+        [ -z "$_pids" ] && break
+
+        # 等任意一个结束（顺便每 3 秒刷一次汇总进度）
+        while :; do
+            _rest=""
+            _finished=""
+            for _p in $_pids; do
+                if kill -0 "$_p" 2>/dev/null; then
+                    _rest="$_rest $_p"
+                else
+                    _finished="$_finished $_p"
+                fi
+            done
+            if [ -n "$_finished" ]; then
+                for _p in $_finished; do
+                    _n=$(cat "$CACHE/.pid.$_p" 2>/dev/null)
+                    if wait "$_p"; then
+                        _ok=$((_ok + 1))
+                        # 清掉这一行的进度残留再打印，免得和进度条糊在一起
+                        [ -t 2 ] && printf '\r\033[K' >&2
+                        say "  ok $_n"
+                    else
+                        _bad=$((_bad + 1))
+                        [ -t 2 ] && printf '\r\033[K' >&2
+                        warn "  $_n 失败（试过 8 次）"
+                        [ -s "$CACHE/.log.$_n" ] && tail -3 "$CACHE/.log.$_n" | sed 's/^/      /' >&2
+                    fi
+                    rm -f -- "$CACHE/.pid.$_p"
+                done
+                _pids="$_rest"
+                break
+            fi
+            # 汇总进度：并行时没法给每个卷一条进度条（会互相盖），
+            # 所以给一条总的。看不到任何动静是最难熬的。
+            if [ -t 2 ]; then
+                _have=$(_bytes_now)
+                # 注意不能写 (_total > 0 ? _total : 1) —— 三元是 bash 扩展，
+                # dash 能通过 sh -n 的语法检查，却在**运行时**报错。
+                _pct=0
+                [ "$_total" -gt 0 ] && _pct=$(( _have * 100 / _total ))
+                printf '\r   下载中 %s/%s 个 | 已收 %sM / %sM（%s%%）   ' \
+                    "$(printf '%s' "$_pids" | wc -w | tr -d ' ')" \
+                    "$_need" \
+                    "$((_have / 1048576))" "$((_total / 1048576))" "$_pct" >&2
+            fi
+            sleep 3
+        done
+    done
+    [ -t 2 ] && printf '\r\033[K' >&2
+
+    # 收尾复查：以磁盘上的 sha256 为准，而不是以退出码为准 ——
+    # 退出码 0 但文件不对（或反过来）都遇到过，校验才是唯一事实。
+    _bad2=0
+    while IFS='	' read -r _name _sha _bytes; do
+        [ -n "$_name" ] || continue
+        [ "$(sha256sum "$CACHE/$_name" 2>/dev/null | cut -d' ' -f1)" = "$_sha" ] \
+            || { warn "  $_name 校验不过"; _bad2=$((_bad2 + 1)); }
+    done < "$CACHE/.vols.tsv"
+    [ "$_bad2" -gt 0 ] && die "$_bad2 个卷校验不过，重跑一次脚本会只补这些"
+
+    say "  $_nvol 个卷全部就绪"
+fi
+
+# 清掉这一轮的临时文件
+rm -f -- "$CACHE"/.log.* "$CACHE"/.pid.* "$CACHE"/.todo.tsv
 
 # --------------------------------------------------------------------------
 # 4. 按顺序拼回一个流，解开，铺到 $HOME
 #    分卷是同一个压缩流的切片，cat 起来就是一个完整的包。
 # --------------------------------------------------------------------------
+# 用 with 关文件，否则 python 会在用户终端上打一串 ResourceWarning
 _comp=$(python3 -c '
-import json,sys
-print(json.load(open(sys.argv[1],encoding="utf-8")).get("compression","gzip"))
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh).get("compression", "gzip"))
 ' "$CACHE/dist.json")
 case $_comp in
     gzip) _dec="gzip -dc" ;;
