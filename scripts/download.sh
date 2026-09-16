@@ -87,8 +87,8 @@ say "下载源 : $DLBASE/$TAG"
 
 # 统一取文件：断点续传 + 重试。
 #
-# 关于 -C -（断点续传）：这条链路只有 200 多 KB/s，一个 32MB 的分卷
-# 要传两分多钟，中途断掉时从断点接着传，而不是从头再来。
+# 关于 -C -（断点续传）：这条链路实测只有 20~240 KB/s，一个 32MB 的分卷
+# 要传好几分钟到二十几分钟，中途断掉时从断点接着传，而不是从头再来。
 #
 # 但 -C - 有个坑：**文件已经完整时它也发 Range 请求**，服务器回 416
 # （Range Not Satisfiable），而 -f 把 416 当失败 —— 于是重跑脚本
@@ -96,21 +96,35 @@ say "下载源 : $DLBASE/$TAG"
 #   · dist.json 很小，每次直接删掉重下，不走续传
 #   · 分卷先校验 sha256，对得上就跳过，不走续传
 # fetch 只负责"确实需要下载"的那些。
+#
+# **故意不给 curl 加 --retry。** 踩过：
+#   curl: (28) Operation timed out ... 21441650 out of 33554432 bytes received
+#   Warning: Transient problem: timeout Will retry in 5 seconds. 3 retries left.
+#   Throwing away 21441650 bytes          ← 关键：扔掉
+# curl 的内部重试**不续传**，它把已经下到的 21MB 整个丢掉从头来。
+# 在 20 KB/s 的链路上，21MB 是十五分钟的成果，扔掉一次就白等一刻钟。
+# 所以重试一律交给**外层这个循环**：它保留断点文件，下一轮 -C - 才真的接上。
+#
+# 另加 --speed-limit/--speed-time 快速识别"停滞"：速度掉到 2 KB/s 以下
+# 持续 90 秒就掐掉重来，而不是傻等到 --max-time 的 15 分钟。
+# （900 秒那个上限仍然留着兜底：连接没断但一直龟速的情况。）
+CURL_OPTS="-fL --connect-timeout 20 --max-time 900 --speed-limit 2048 --speed-time 90"
+
 fetch() {
     _url=$1; _out=$2; shift 2
     _try=0; _nop=0
     while :; do
         _try=$((_try + 1))
         # 进度**必须露出来**。原来这里 >/dev/null 2>&1 把 curl 的进度条
-        # 一起吞了，于是一个 32MB 的卷要下两三分钟、屏幕上一声不吭 ——
+        # 一起吞了，于是一个 32MB 的卷要下好久、屏幕上一声不吭 ——
         # 看起来就是"卡死了"，用户会以为网络断了然后去查网络。
-        # 现在进度条走 stderr（只在终端里显示），报错单独留一份。
+        # 现在进度条走 stderr（只在终端里显示），非终端下才静默。
         if [ -t 2 ]; then
-            curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
-                 -C - --progress-bar -o "$_out" "$_url" "$@" && return 0
+            # shellcheck disable=SC2086
+            curl $CURL_OPTS -C - --progress-bar -o "$_out" "$_url" "$@" && return 0
         else
-            curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
-                 -C - -o "$_out" "$_url" "$@" 2>/dev/null && return 0
+            # shellcheck disable=SC2086
+            curl $CURL_OPTS -C - -o "$_out" "$_url" "$@" 2>/dev/null && return 0
         fi
         # 环境里有代理变量、而代理恰好连不上 GitHub 时，干等是没有意义的：
         # 实测这台机器上代理对 GitHub 反而是坏的（走它直接 SSL 断开，
@@ -120,10 +134,10 @@ fetch() {
            && [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
             _nop=1
             warn "取不到 $(basename -- "$_url")，绕开代理重试"
+            # shellcheck disable=SC2086
             if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy \
                    -u ALL_PROXY -u all_proxy \
-                   curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 \
-                        --max-time 900 -C - --progress-bar -o "$_out" "$_url" "$@"; then
+                   curl $CURL_OPTS -C - --progress-bar -o "$_out" "$_url" "$@"; then
                 return 0
             fi
         fi
