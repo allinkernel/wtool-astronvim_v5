@@ -39,9 +39,25 @@ command -v curl >/dev/null 2>&1 || die "需要 curl"
 # 基础组件装好了，download 却报"需要 gh"。
 # Release 资产本来就是公开 URL，curl 就够，而 curl 是基础组件里已有的。
 #
-# 只有"列 tag"这一步用 API；取不到就要求显式指定 TAG。
+# **而且下载本身也要走 API，不能走 github.com。**
+# 实测这台机器上：
+#   api.github.com                  200 / 0.43s   ✓
+#   objects.githubusercontent.com                 ✓
+#   github.com                                    ✗ 超时
+# 而 release 资产的常规 URL 是
+#   https://github.com/OWNER/REPO/releases/download/TAG/ASSET
+# —— 第一步就要访问 github.com 拿 302 跳转，于是**永远卡在那里**。
+# 表现为：脚本一声不吭地挂着，看起来像卡死，其实是卡在等一个连不上的域名。
+#
+# 绕开的办法是走 API 的资产端点：
+#   GET https://api.github.com/repos/O/R/releases/assets/<id>
+#       Accept: application/octet-stream
+# 它会 302 到 release-assets.githubusercontent.com，全程不碰 github.com。
+# 资产的 id 从 release 详情里拿。
 # --------------------------------------------------------------------------
 API=https://api.github.com/repos/$REPO
+# 常规 URL 留作退路：API 限流（匿名 60 次/小时）或它抽风时还能用，
+# 在 github.com 能通的网络里这条更快
 DLBASE=https://github.com/$REPO/releases/download
 
 if [ -z "${WTOOL_DL_TAG:-}" ]; then
@@ -81,11 +97,21 @@ say "下载源 : $DLBASE/$TAG"
 #   · 分卷先校验 sha256，对得上就跳过，不走续传
 # fetch 只负责"确实需要下载"的那些。
 fetch() {
-    _url=$1; _out=$2; _try=0; _nop=0
+    _url=$1; _out=$2; shift 2
+    _try=0; _nop=0
     while :; do
         _try=$((_try + 1))
-        curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
-             -C - -o "$_out" "$_url" 2>/dev/null && return 0
+        # 进度**必须露出来**。原来这里 >/dev/null 2>&1 把 curl 的进度条
+        # 一起吞了，于是一个 32MB 的卷要下两三分钟、屏幕上一声不吭 ——
+        # 看起来就是"卡死了"，用户会以为网络断了然后去查网络。
+        # 现在进度条走 stderr（只在终端里显示），报错单独留一份。
+        if [ -t 2 ]; then
+            curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
+                 -C - --progress-bar -o "$_out" "$_url" "$@" && return 0
+        else
+            curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
+                 -C - -o "$_out" "$_url" "$@" 2>/dev/null && return 0
+        fi
         # 环境里有代理变量、而代理恰好连不上 GitHub 时，干等是没有意义的：
         # 实测这台机器上代理对 GitHub 反而是坏的（走它直接 SSL 断开，
         # 直连 200/0.6s）。所以第一次失败之后就绕开代理再试。
@@ -97,7 +123,7 @@ fetch() {
             if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy \
                    -u ALL_PROXY -u all_proxy \
                    curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 \
-                        --max-time 900 -C - -o "$_out" "$_url" 2>/dev/null; then
+                        --max-time 900 -C - --progress-bar -o "$_out" "$_url" "$@"; then
                 return 0
             fi
         fi
@@ -113,11 +139,66 @@ fetch() {
 mkdir -p -- "$CACHE"
 cd -- "$CACHE" || die "进不去缓存目录 $CACHE"
 
+# --------------------------------------------------------------------------
+# 1. 取 release 详情：拿到每个资产的 id。
+#    下载走 API 的 /releases/assets/<id>，这样全程不碰 github.com
+#    （这台机器上它是死的，见文件头）。
+# --------------------------------------------------------------------------
+say "取 release 详情"
+_rel_json="$CACHE/.release.json"
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL --max-time 30 -H "Authorization: Bearer $GITHUB_TOKEN" \
+         "$API/releases/tags/$TAG" -o "$_rel_json" 2>/dev/null || true
+else
+    curl -fsSL --max-time 30 "$API/releases/tags/$TAG" -o "$_rel_json" 2>/dev/null || true
+fi
+
+# 资产名 <TAB> id，供下面查
+python3 - "$_rel_json" > "$CACHE/.assets.tsv" 2>/dev/null <<'PYEOF' || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        d = json.load(fh)
+except Exception:
+    sys.exit(0)
+for a in d.get("assets", []):
+    print("%s\t%s" % (a["name"], a["id"]))
+PYEOF
+_have_api=0
+[ -s "$CACHE/.assets.tsv" ] && _have_api=1
+
+# asset_id <名字> → 打印 id（没有就打印空）
+asset_id() {
+    [ "$_have_api" = 1 ] || return 0
+    awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' "$CACHE/.assets.tsv"
+}
+
+# 取一个资产：优先 API 端点（不碰 github.com），失败再退回常规 URL。
+# API 返回的是**带签名的临时链接**（约一小时过期），所以每次都重新请求，
+# 不能把跳转后的地址存下来复用。
+get_asset() {
+    _name=$1; _out=$2
+    _id=$(asset_id "$_name")
+    if [ -n "$_id" ]; then
+        fetch "https://api.github.com/repos/$REPO/releases/assets/$_id" "$_out" \
+            -H "Accept: application/octet-stream" && return 0
+    fi
+    warn "$_name 走 API 失败，退回 github.com 常规地址"
+    fetch "$DLBASE/$TAG/$_name" "$_out"
+}
+
+if [ "$_have_api" = 1 ]; then
+    say "资产表 : $(awk 'END{print NR}' "$CACHE/.assets.tsv") 个（走 api.github.com，绕开 github.com）"
+else
+    warn "取不到 release 详情（API 限流？），退回 github.com 常规地址"
+    warn "  如果一直卡住不动，多半就是 github.com 连不上 —— 设 GITHUB_TOKEN 再来"
+fi
+
 say "取 dist.json"
 # 先删再取：它只有几 KB，重下的代价可以忽略，而留着旧文件会让
 # -C - 撞上 416（见上面 fetch 的注释）
 rm -f -- "$CACHE/dist.json"
-fetch "$DLBASE/$TAG/dist.json" "$CACHE/dist.json" || die "下载 dist.json 失败"
+get_asset dist.json "$CACHE/dist.json" || die "下载 dist.json 失败"
 
 python3 - "$CACHE/dist.json" > "$CACHE/.vols.tsv" <<'PY'
 import json, sys
@@ -145,7 +226,7 @@ while IFS='	' read -r _name _sha _bytes; do
     _try=0
     while :; do
         _try=$((_try + 1))
-        if fetch "$DLBASE/$TAG/$_name" "$CACHE/$_name"; then
+        if get_asset "$_name" "$CACHE/$_name"; then
             _got=$(sha256sum "$_name" 2>/dev/null | cut -d' ' -f1)
             # 下全了才可能校验通过。网断时 curl 会留下一个**截断的文件**，
             # 不校验的话后面解压会报一句莫名其妙的 tar 错误。
