@@ -45,7 +45,16 @@ WTOOL_PUBLISH_DATE=${WTOOL_PUBLISH_DATE:-$(date +%Y-%m-%d)}
 TARGET=${WTOOL_PUBLISH_TARGET:-}
 IMAGE=${WTOOL_PUBLISH_IMAGE:-}
 NVIM_REF=${WTOOL_PUBLISH_NVIM_REF:-}
-VOLUME_SIZE=${VOLUME_SIZE:-300M}
+# 每卷多大。**这个值不是随便定的，它要和网络的可靠性窗口匹配。**
+#
+# 踩过：默认 300M，产物流 485M 被切成 314M + 192M 两个卷，
+# 结果一个都传不上去。实测直连 GitHub 上传只有 ~237 KB/s，
+# 314M 要传 22 分钟，而这条链路每隔几分钟就断一次 ——
+# 单次 POST 永远完不成，重试也只是从头再来一遍。
+# 切成 32M（每个约 2 分钟）之后就能一个个传完，断了只重传一个卷。
+#
+# 所以：网络越不稳，卷要越小。体积大了用 VOLUME_SIZE=128M 之类自己调。
+VOLUME_SIZE=${VOLUME_SIZE:-32M}
 KEEP=0
 DRY_RUN=0
 NO_CACHE=0
@@ -502,7 +511,7 @@ dist = {
     "built_at": date,
     "target": target,
     "compression": comp,
-    "volume_size": os.environ.get("VOLUME_SIZE", "300M"),
+    "volume_size": os.environ.get("VOLUME_SIZE", "32M"),
     "volumes": vols,
     "install": {
         "how": "把 install.sh、dist.json 和所有 -volNN 放在同一个目录，然后：bash install.sh",
