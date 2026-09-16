@@ -140,6 +140,12 @@ install_deps() {
     #     只留一句"这批没装上"，只能靠猜——白白浪费一轮几十分钟的构建。
     #   * DPkg::Lock::Timeout：并发或上一批的触发器还没收尾时，
     #     让 apt 等锁而不是直接报失败。
+    #   * Acquire::*::Timeout / Retries：**这条是后来补的，代价是浪费了一整轮构建**。
+    #     原来只写了"失败就重试"，但 apt 默认没有下载超时 ——
+    #     代理后面的连接**停滞**不算失败，apt 会一直挂着等，
+    #     重试和换源那段代码永远轮不到执行。
+    #     实测一批包挂了 20 分钟、一个字节都没下，进程还在。
+    #     加上超时，"卡住"就会变成"失败"，退路逻辑才真正生效。
     _apt() {
         if [ "$DRY_RUN" = 1 ]; then step "[dry-run] apt-get install $*"; return 0; fi
         _aptlog="$STATE_DIR/.apt.log"
@@ -147,21 +153,28 @@ install_deps() {
         while [ "$_try" -lt 2 ]; do
             _try=$((_try + 1))
             if DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                    --no-install-recommends -o DPkg::Lock::Timeout=120 "$@" \
+                    --no-install-recommends -o DPkg::Lock::Timeout=120 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 \
+                    -o Acquire::Retries=3 "$@" \
                     >"$_aptlog" 2>&1; then
                 return 0
             fi
             if [ "$_try" -lt 2 ]; then
-                warn "这批没装上，10 秒后重试: $*"
+                warn "这批没装上（可能是下载停滞、20s 超时已触发），10 秒后换源重试: $*"
                 sleep 10
-                _apt_switched=0          # 允许这次重试时换源
-                _apt_prepare >/dev/null 2>&1 || true
+                # 直接强制换源：索引好不代表包能下来，别再问 update 的意见
+                _apt_switch_mirror
             fi
         done
-        warn "这批最终没装上（继续，但后面可能出错）: $*"
+        warn "这批最终没装上: $*"
         warn "apt 最后的输出："
         tail -15 "$_aptlog" 2>/dev/null | sed 's/^/    /' >&2
-        return 0
+        # 这里原来是"继续，但后面可能出错"。那是错的：
+        # 缺了编译器/解释器，错误会在十分钟后以一句看不懂的
+        # 编译报错冒出来，没人能从那句话倒推回"其实是 apt 没装上"。
+        # 现在直接死在这里，错因就在眼前。
+        die "构建依赖没装上，无法继续：$*"
     }
 
     # 换源退路：宿主代理走 archive.ubuntu.com / security.ubuntu.com 经常 502
@@ -170,9 +183,21 @@ install_deps() {
     _apt_prepare() {
         if [ "$DRY_RUN" = 1 ]; then return 0; fi
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 && return 0
+        apt-get update -qq \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::Retries=3 >/dev/null 2>&1 && return 0
         [ "$_apt_switched" = 1 ] && return 1
-        warn "apt 源不可用，换成 $_apt_mirror 重试"
+        _apt_switch_mirror
+    }
+
+    # 真正换源。必须能**被强制调用**：
+    # 索引（apt-get update）好好的、坏的是**包下载**，这种情况
+    # _apt_prepare 会认为"源没问题"而拒绝换源，于是重试还是走同一个
+    # 卡死的源，白等一轮。所以 _apt 重试时直接调这个，不问 update 的意见。
+    _apt_switch_mirror() {
+        [ "$_apt_switched" = 1 ] && return 0
+        warn "换成国内镜像重试: $_apt_mirror"
         _apt_switched=1
         . /etc/os-release 2>/dev/null || true
         mkdir -p /etc/apt/sources.list.d
@@ -194,7 +219,10 @@ EOF
             esac
         done
         rm -f /etc/apt/sources.list 2>/dev/null || true
-        apt-get update -qq >/dev/null 2>&1
+        apt-get update -qq \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::Retries=3 >/dev/null 2>&1
     }
     _apt_switched=0
     _apt_prepare || warn "apt-get update 失败（继续，可能用不了）"

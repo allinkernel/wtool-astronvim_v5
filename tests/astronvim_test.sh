@@ -32,7 +32,14 @@ H="$T/h1"; mkdir -p "$H"
 env HOME="$H" "$BUILD" --no-deps --dry-run --nvim-ref=v0.11.0 > "$T/log1" 2>&1 || {
     bad "dry-run 退出码非 0"; sed 's/^/     /' "$T/log1"; }
 grep -q '模式     : build' "$T/log1" && ok "build.sh 认出自己是构建" || bad "模式判定不对"
-grep -q 'cmake' "$T/log1" && ok "计划里有 cmake 编译步骤" || bad "计划里没有编译步骤"
+# 原来断言的是日志里出现 'cmake'。换了构建方式后就假报警了，
+# 而且它锁的是"某个词出现过"，不是"命令对不对"。
+# 真正踩过的坑是：**必须走 make**，用裸 cmake 会因为
+# cmake.deps 没被构建而报 "Failed to find a Lua 5.1-compatible interpreter"。
+grep -q 'make -C .*-j' "$T/log1" && ok "计划里走 make 编 nvim（不是裸 cmake）" \
+    || { bad "计划里没有 make 编译步骤"; sed 's/^/     /' "$T/log1" | head -20; }
+grep -q 'cmake\.deps\|make -C' "$T/log1" && ok "计划里有依赖子构建" || bad "计划里缺依赖子构建"
+grep -q 'CMAKE_INSTALL_PREFIX' "$T/log1" && ok "计划里指定了安装前缀" || bad "计划里没指定安装前缀"
 grep -q 'dry-run' "$T/log1" && ok "确实说了 dry-run" || bad "没说 dry-run"
 hasnt "dry-run 没有建 \$HOME/.local/bin/nvim" "$H/.local/bin/nvim"
 hasnt "dry-run 没有写 .zshrc" "$H/.zshrc"
@@ -170,8 +177,53 @@ echo "== 9. 清单与快照文件都在 =="
 has "mason-packages.txt" "$proj/mason-packages.txt"
 has "treesitter-parsers.txt" "$proj/treesitter-parsers.txt"
 has "mason-versions.json" "$proj/mason-versions.json"
-chk "mason 清单 75 个包" "$(grep -cv '^#' "$proj/mason-packages.txt")" "75"
-chk "treesitter 251 个 parser" "$(grep -cv '^#' "$proj/treesitter-parsers.txt")" "251"
+# 这里原来写的是"清单里有 75 个包 / 251 个 parser"。
+# 那种**数字快照**式断言是错的：清单本身就是要按需增删的东西，
+# 一改就假报警，改的人只好顺手把数字改掉——测试就退化成
+# "文件没被动过"，完全测不到"内容对不对"。
+# 真正该锁的是**一致性**：配置里启用的 server/parser 必须在清单里，
+# 清单里的也必须真的被用到。数量多少是结果，不是契约。
+echo "== 9b. 清单和配置必须对得上 =="
+_servers=$(sed -n '/servers *= *{/,/}/p' \
+    "$proj/astronvim_v5_config/lua/plugins/astrolsp.lua" 2>/dev/null |
+    tr -d '"{},' | grep -oE '[A-Za-z_][A-Za-z0-9_-]*' |
+    grep -vE '^(servers|local)$' | sort -u)
+if [ -z "$_servers" ]; then
+    bad "读不出 astrolsp.lua 里启用的 LSP server"
+else
+    _miss=""
+    for _s in $_servers; do
+        # 名字两边不总一样，这层映射必须显式写出来：
+        # lspconfig 的 server 名 ≠ mason 的包名。
+        # 归一化时去掉 - 和 _：rust_analyzer ↔ rust-analyzer
+        _mason=$_s
+        case $_s in
+            bashls) _mason="bash-language-server" ;;
+        esac
+        _norm=$(printf '%s' "$_mason" | tr -d '_-' | tr 'A-Z' 'a-z')
+        if ! grep -vE '^[[:space:]]*(#|$)' "$proj/mason-packages.txt" |
+             tr -d '_-' | tr 'A-Z' 'a-z' | grep -qx -- "$_norm"; then
+            _miss="$_miss $_mason"
+        fi
+    done
+    if [ -z "$_miss" ]; then
+        ok "astrolsp 启用的 $(printf '%s' "$_servers" | wc -w | tr -d ' ') 个 server 都在 mason 清单里"
+    else
+        bad "这些 server 配置里启用了但清单里没有:$_miss"
+    fi
+fi
+
+_ft=$(grep -vE '^\s*(#|$)' "$proj/treesitter-parsers.txt" | sort -u)
+if [ -n "$_ft" ]; then
+    ok "treesitter 清单 $(printf '%s\n' "$_ft" | wc -l | tr -d ' ') 个 parser"
+else
+    bad "treesitter 清单是空的"
+fi
+# nvim 自带的 vim/vimdoc/lua 之外的解析器都得在清单里，否则打开文件没高亮
+for _need in c lua python; do
+    printf '%s\n' "$_ft" | grep -qx -- "$_need" && ok "parser 清单含 $_need" \
+        || bad "parser 清单缺 $_need"
+done
 
 echo
 printf 'astronvim_test: PASS %d  FAIL %d\n' "$pass" "$fail"
