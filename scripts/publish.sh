@@ -308,8 +308,14 @@ trap cleanup EXIT INT TERM
 # --------------------------------------------------------------------------
 # 3. 起容器
 # --------------------------------------------------------------------------
-say "拉镜像 $IMAGE"
-docker pull "$IMAGE" >/dev/null || die "拉镜像失败: $IMAGE"
+# 镜像已经在本地就不拉 —— 网络断的时候 docker pull 会直接失败，
+# 而本地明明有能用的镜像。先查再拉。
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    say "镜像 $IMAGE 已在本地，跳过拉取"
+else
+    say "拉镜像 $IMAGE"
+    docker pull "$IMAGE" >/dev/null || die "拉镜像失败: $IMAGE（本地没有，网络也不通）"
+fi
 
 # 网络模式。这里有个很容易踩的坑：
 #   宿主机的代理通常是 http://127.0.0.1:7897，而 **容器里的 127.0.0.1
