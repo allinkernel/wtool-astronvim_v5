@@ -70,8 +70,16 @@ say "发布页 : $REPO @ $TAG"
 say "下载源 : $DLBASE/$TAG"
 
 # 统一取文件：断点续传 + 重试。
-# -C - 很关键：这条链路只有 200 多 KB/s，一个 32MB 的分卷要传两分多钟，
-# 中途断掉时从断点接着传，而不是从头再来一遍。
+#
+# 关于 -C -（断点续传）：这条链路只有 200 多 KB/s，一个 32MB 的分卷
+# 要传两分多钟，中途断掉时从断点接着传，而不是从头再来。
+#
+# 但 -C - 有个坑：**文件已经完整时它也发 Range 请求**，服务器回 416
+# （Range Not Satisfiable），而 -f 把 416 当失败 —— 于是重跑脚本
+# 反而报"下载失败"。所以调用方必须先判断"这份还要不要下"：
+#   · dist.json 很小，每次直接删掉重下，不走续传
+#   · 分卷先校验 sha256，对得上就跳过，不走续传
+# fetch 只负责"确实需要下载"的那些。
 fetch() {
     _url=$1; _out=$2; _try=0; _nop=0
     while :; do
@@ -106,6 +114,9 @@ mkdir -p -- "$CACHE"
 cd -- "$CACHE" || die "进不去缓存目录 $CACHE"
 
 say "取 dist.json"
+# 先删再取：它只有几 KB，重下的代价可以忽略，而留着旧文件会让
+# -C - 撞上 416（见上面 fetch 的注释）
+rm -f -- "$CACHE/dist.json"
 fetch "$DLBASE/$TAG/dist.json" "$CACHE/dist.json" || die "下载 dist.json 失败"
 
 python3 - "$CACHE/dist.json" > "$CACHE/.vols.tsv" <<'PY'
@@ -139,12 +150,17 @@ while IFS='	' read -r _name _sha _bytes; do
             # 下全了才可能校验通过。网断时 curl 会留下一个**截断的文件**，
             # 不校验的话后面解压会报一句莫名其妙的 tar 错误。
             [ "$_got" = "$_sha" ] && { say "  ok $_name"; break; }
-            warn "  $_name 校验不过（第 $_try 次），重下"
+            # 校验不过说明这份**内容不对**（不是没下完），断点续传接下去
+            # 只会越接越错 —— 必须删掉重下。
+            warn "  $_name 校验不过（第 $_try 次），删掉重下"
+            rm -f -- "$_name"
         else
-            warn "  $_name 下载失败（第 $_try 次）"
+            # 下载**中途失败**时**不要删**：文件是截断的，但前面那些字节
+            # 是对的，下一次 curl -C - 能接着传。删了就等于每次断线都从头再来，
+            # 而这条链路只有 200 多 KB/s、每几分钟断一次 —— 那样永远传不完。
+            warn "  $_name 下载中断（第 $_try 次），保留断点，稍后续传"
         fi
         [ "$_try" -ge 8 ] && die "$_name 试了 8 次都不行，放弃（网络太差？）"
-        rm -f -- "$_name"
         sleep 10
     done
 done < "$CACHE/.vols.tsv"
