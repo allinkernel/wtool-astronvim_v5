@@ -73,11 +73,26 @@ say "下载源 : $DLBASE/$TAG"
 # -C - 很关键：这条链路只有 200 多 KB/s，一个 32MB 的分卷要传两分多钟，
 # 中途断掉时从断点接着传，而不是从头再来一遍。
 fetch() {
-    _url=$1; _out=$2; _try=0
+    _url=$1; _out=$2; _try=0; _nop=0
     while :; do
         _try=$((_try + 1))
         curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 900 \
              -C - -o "$_out" "$_url" 2>/dev/null && return 0
+        # 环境里有代理变量、而代理恰好连不上 GitHub 时，干等是没有意义的：
+        # 实测这台机器上代理对 GitHub 反而是坏的（走它直接 SSL 断开，
+        # 直连 200/0.6s）。所以第一次失败之后就绕开代理再试。
+        # 但不能一律不用代理 —— 有的网络只有代理能出去，所以是"失败后退一步"。
+        if [ "$_nop" = 0 ] \
+           && [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
+            _nop=1
+            warn "取不到 $(basename -- "$_url")，绕开代理重试"
+            if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy \
+                   -u ALL_PROXY -u all_proxy \
+                   curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 \
+                        --max-time 900 -C - -o "$_out" "$_url" 2>/dev/null; then
+                return 0
+            fi
+        fi
         [ "$_try" -ge 8 ] && return 1
         sleep 10
     done
