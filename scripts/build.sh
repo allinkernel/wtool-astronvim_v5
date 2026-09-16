@@ -222,9 +222,15 @@ install_deps() {
             printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$_mhost" \
                 > /etc/apt/apt.conf.d/99wtool-noproxy
         fi
-        # 用**老的一行式格式**，不要 deb822 的 .sources ——
-        # Ubuntu 20.04 的 apt 是 2.0，不认 deb822（那是 22.04 / apt 2.4 才有的）。
-        # 一行式在所有版本上都能读。
+        # 用一行式格式。**注意：不是因为 focal 不认 deb822。**
+        # 我原先在这里写"20.04 的 apt 2.0 不认 deb822"，那是错的 ——
+        # 实测 focal 的 apt 2.0.10 完全读得懂 .sources（deb822 支持在
+        # apt 1.1 就有了，2.4 变的只是默认值）。
+        # 真正踩到的坑是：同一个 URI 出现**两份**配置文件、Signed-By 不一致时，
+        # apt 会拒绝读取整份源列表：
+        #   E: Conflicting values set for option Signed-By regarding source ...
+        # 表现是 apt 彻底瘫痪，连"包不存在"都报不出来。
+        # 一行式在这里更省事：不容易和别人写的 .sources 撞车。
         cat > /etc/apt/sources.list.d/wtool-mirror.list <<EOF
 deb $_apt_mirror/ ${VERSION_CODENAME} main restricted universe multiverse
 deb $_apt_mirror/ ${VERSION_CODENAME}-updates main restricted universe multiverse
