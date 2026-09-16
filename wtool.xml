@@ -21,6 +21,9 @@
     <!-- 目标系统矩阵。nvim 是半静态链接、只依赖 glibc，而 glibc 单向兼容：
          在 24.04 上编的包在 22.04 上跑不起来。所以每个 target 单独出一组分卷。
          publish.sh 会问用户要哪个。 -->
+    <!-- 在 20.04（glibc 2.31）里编出来的包，20.04/22.04/24.04/26.04 全都能跑。
+         glibc 只向前兼容，所以在最老的那个里编 = 一张包通吃。 -->
+    <target os="ubuntu" version="20.04" codename="focal"/>
     <target os="ubuntu" version="24.04" codename="noble"/>
     <target os="ubuntu" version="22.04" codename="jammy"/>
 

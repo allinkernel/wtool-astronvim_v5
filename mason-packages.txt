@@ -1,78 +1,19 @@
 # astronvim_v5 需要的 mason 包清单
-# 由 tools/snapshot.sh 生成。install.sh 照这份装；改动请重跑脚本，不要手改。
-# 注意：mason 没有版本锁定机制，这里固定的是"装哪些"，不是"装到什么版本"。
-actionlint
-alex
-asm-lsp
-asmfmt
-ast-grep
-autoflake
-autopep8
-autotools-language-server
-awk-language-server
-bacon
-bash-debug-adapter
-bash-language-server
-beautysh
-bibtex-tidy
-biome
-cbfmt
-cfn-lint
-checkmake
-clang-format
+#
+# 只留实际在用的五种语言的 LSP。原来是 75 个（2.7G），减到 5 个（约 400M）——
+# 那 75 个是历次 :Mason 浏览时顺手装的，绝大多数语言根本用不到。
+#
+# 关键事实：这五个**全部是预编译包，一个都不用编**（除了 gopls mason 选了
+# go install，但它官方也有预编译 release）。来源见 mason 注册表：
+#   clangd        pkg:github/clangd/clangd           → clangd-linux-*.zip
+#   pyright       pkg:npm/pyright                    → npm 包
+#   rust-analyzer pkg:github/rust-lang/rust-analyzer → rust-analyzer-x86_64-unknown-linux-gnu.gz
+#   gopls         pkg:golang/golang.org/x/tools/gopls
+#   bash-language-server  pkg:npm/bash-language-server
+#
+# 加语言怎么办：见 editor/astronvim_v5/lang/ 下的语言包，别往这里堆。
 clangd
-cmakelang
-cmakelint
-codelldb
-cortex-debug
-cpplint
-cpptools
-crlfmt
-debugpy
-flake8
-flakeheaven
-go-debug-adapter
-gofumpt
-golangci-lint
-gopls
-html-lsp
-jsonlint
-local-lua-debugger-vscode
-lua-language-server
-luacheck
-markdownlint
-markdownlint-cli2
-markuplint
-mbake
-mypy
-nilaway
-perl-debug-adapter
-perlnavigator
-prettypst
-proselint
-pymarkdownlnt
 pyright
-quick-lint-js
-rome
-rumdl
 rust-analyzer
-selene
-shellcheck
-shellharden
-sqlls
-sqls
-standardjs
-staticcheck
-stylua
-systemdlint
-texlab
-textlint
-tinymist
-tsgo
-typescript-language-server
-vint
-vscode-home-assistant
-wasm-language-tools
-wc-language-server
-write-good
-zk
+gopls
+bash-language-server
