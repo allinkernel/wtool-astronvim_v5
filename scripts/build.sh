@@ -176,18 +176,20 @@ install_deps() {
         _apt_switched=1
         . /etc/os-release 2>/dev/null || true
         mkdir -p /etc/apt/sources.list.d
-        cat > /etc/apt/sources.list.d/wtool-mirror.sources <<EOF
-Types: deb
-URIs: $_apt_mirror/
-Suites: ${VERSION_CODENAME} ${VERSION_CODENAME}-updates ${VERSION_CODENAME}-backports ${VERSION_CODENAME}-security
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        # 用**老的一行式格式**，不要 deb822 的 .sources ——
+        # Ubuntu 20.04 的 apt 是 2.0，不认 deb822（那是 22.04 / apt 2.4 才有的）。
+        # 一行式在所有版本上都能读。
+        cat > /etc/apt/sources.list.d/wtool-mirror.list <<EOF
+deb $_apt_mirror/ ${VERSION_CODENAME} main restricted universe multiverse
+deb $_apt_mirror/ ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb $_apt_mirror/ ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb $_apt_mirror/ ${VERSION_CODENAME}-security main restricted universe multiverse
 EOF
         # 镜像自带的是 ubuntu.sources（不是 .list），必须一起删 ——
         # 只删 .list 的话那个 502 的源还挂着，update 照样失败
         for _f in /etc/apt/sources.list.d/*; do
             case $_f in
-                */wtool-mirror.sources) ;;
+                */wtool-mirror.list) ;;
                 *) rm -f -- "$_f" 2>/dev/null || true ;;
             esac
         done
