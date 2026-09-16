@@ -425,10 +425,12 @@ LUA
 # install_treesitter
 # --------------------------------------------------------------------------
 install_treesitter() {
-    say "编译 treesitter parser（251 个，最耗时的一步）"
     _list="$PROJECT_DIR/treesitter-parsers.txt"
     if [ ! -f "$_list" ]; then warn "没有 treesitter-parsers.txt，跳过"; return 0; fi
     _names=$(grep -v '^#' "$_list" | grep -v '^$' | tr '\n' ' ')
+    # 数量从清单现算。原来这里写死"251 个"，清单减到 15 之后
+    # 它还在喊 251 —— 日志说谎比没日志更坏，会让人以为漏跑了什么。
+    say "编译 treesitter parser（$(printf '%s\n' $_names | wc -l | tr -d ' ') 个，最耗时的一步）"
 
     if [ "$DRY_RUN" = 1 ]; then step "[dry-run] TSInstall $(printf '%s' "$_names" | wc -w) 个 parser"; return 0; fi
 
