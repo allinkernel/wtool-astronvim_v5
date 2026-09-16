@@ -367,11 +367,14 @@ fi
 # --------------------------------------------------------------------------
 # 4. 在容器里跑 install.sh
 #
-# 这一步可能几十分钟（编 nvim + 56 个插件 + 75 个 mason 包 + 251 个 parser）。
+# 这一步可能几十分钟（编 nvim + 拉插件 + 装 mason 包 + 编 parser）。
+# 具体数量从清单现算，不写死 —— 写死的数字改了清单就会说谎。
 # 日志直接透到终端，不然卡住了看不出卡在哪。
 # --------------------------------------------------------------------------
 say ""
-say "在容器里安装（这一步很久：编 nvim、拉插件、装 75 个 mason 包、编 251 个 parser）"
+_npkg=$(grep -cvE '^[[:space:]]*(#|$)' "$HERE/../mason-packages.txt" 2>/dev/null || echo "?")
+_npar=$(grep -cvE '^[[:space:]]*(#|$)' "$HERE/../treesitter-parsers.txt" 2>/dev/null || echo "?")
+say "在容器里安装（这一步很久：编 nvim、拉插件、装 $_npkg 个 mason 包、编 $_npar 个 parser）"
 say "------------------------------------------------------------------------"
 # 容器里两步走：build.sh 生产（编 nvim、拉插件、装 mason、编 parser），
 # install.sh 登记和收尾（写安装清单、shell 集成）。
@@ -409,10 +412,20 @@ while IFS='	' read -r _kind _rel _rest; do
 
     # nvim 自己的运行时和二进制可能落在 .local/bin、.local/share/nvim、
     # .local/lib/nvim，都在清单里逐条列着，照抄就行
-    docker cp "$CTR:/root/$_rel" "$WORK/payload/home/$_rel" >/dev/null 2>&1 || {
-        warn "薅不出来: $_rel（可能没生成，跳过）"
+    #
+    # **必须先建目标父目录**：docker cp 不创建中间目录，目标目录不存在时
+    # 它直接报 invalid output path: directory "..." does not exist。
+    # 原来只 mkdir 了 payload/home 这一层，于是 .local/bin、.config 全都不存在，
+    # 五条产物**一条都复制不出来**，最后死在"一条 payload 都没有"，
+    # 看起来像"install.sh 没产出东西"，其实是复制这一步的用法错了。
+    # （实测：目标父目录存在就成功，不存在就报上面那句。）
+    mkdir -p -- "$(dirname -- "$WORK/payload/home/$_rel")" || {
+        warn "建不出目标目录，跳过: $_rel"; continue; }
+    if ! docker cp "$CTR:/root/$_rel" "$WORK/payload/home/$_rel" 2>"$WORK/.cp.err"; then
+        warn "薅不出来: $_rel"
+        sed 's/^/      /' "$WORK/.cp.err" 2>/dev/null | head -3 >&2
         continue
-    }
+    fi
     printf 'payload\t%s\n' "$_rel" >> "$WORK/payload/OWNED.tsv"
     _n=$((_n + 1))
     step "$_rel"

@@ -3,7 +3,7 @@
 #
 # 和 install.sh 的分工（这条线要守住，否则两个脚本会长成一团）：
 #   build.sh    需要网络、需要编译器的活：装系统依赖、编 nvim、
-#               拉 56 个 lazy 插件、装 75 个 mason 包、编 251 个 treesitter parser
+#               拉 lazy 插件、装 mason 包、编 treesitter parser（数量看各自的清单文件）
 #   install.sh  不需要网络也不需要编译器：铺配置、写 shell 集成、
 #               记安装清单、从发布分卷部署、卸载
 #
@@ -379,7 +379,7 @@ install_mason() {
 
     _names=$(grep -v '^#' "$_list" | grep -v '^$' | tr '\n' ' ')
     _n=$(printf '%s' "$_names" | wc -w)
-    say "  共 $_n 个包，这一步最慢（2.7G 下载量）"
+    say "  共 $_n 个包，这一步最慢（按清单里实际数量，不是写死的总量）"
 
     if [ "$DRY_RUN" = 1 ]; then step "[dry-run] MasonInstall $_n 个包"; return 0; fi
 
@@ -450,7 +450,7 @@ LUA
     rm -f -- "$STATE_DIR/.ts-install.lua"
 
     _have=$(find "$DATA_DIR/lazy/nvim-treesitter/parser" -name '*.so' 2>/dev/null | wc -l)
-    say "  现在有 $_have 个 parser（清单里 $_names 个）"
+    say "  现在有 $_have 个 parser（清单里 $(printf '%s\n' $_names | wc -l | tr -d ' ') 个）"
 }
 
 # --------------------------------------------------------------------------

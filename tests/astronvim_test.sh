@@ -225,6 +225,30 @@ for _need in c lua python; do
         || bad "parser 清单缺 $_need"
 done
 
+echo "== 10. 薅产物：docker cp 之前必须先建目标父目录 =="
+# 真出过事，而且是"从来没成功过"那种：docker cp **不创建中间目录**，
+# 目标父目录不存在时它报 invalid output path: directory "..." does not exist。
+# publish.sh 只 mkdir 了 payload/home 一层，于是 .local/bin、.config
+# 全都不存在，五条产物一条都复制不出来，最后死在
+# "安装清单里一条 payload 都没有" —— 看起来像 install.sh 没产出东西，
+# 其实是复制这一步的用法错了，排查方向整个被带偏。
+# 完整的端到端验证要跑容器（人工），这里至少把**顺序**锁死。
+_pub=$proj/scripts/publish.sh
+_mk=$(grep -n 'mkdir -p -- "\$(dirname -- "\$WORK/payload/home/\$_rel")"' "$_pub" | head -1 | cut -d: -f1)
+_cp=$(grep -n 'docker cp "\$CTR:/root/\$_rel"' "$_pub" | head -1 | cut -d: -f1)
+if [ -z "$_mk" ]; then
+    bad "publish.sh 里没有为目标父目录 mkdir -p（docker cp 会全部失败）"
+elif [ -z "$_cp" ]; then
+    bad "publish.sh 里找不到薅产物那行 docker cp（测试要跟着改）"
+elif [ "$_mk" -lt "$_cp" ]; then
+    ok "先建目标父目录（第 $_mk 行）再 docker cp（第 $_cp 行）"
+else
+    bad "顺序反了：docker cp 在第 $_cp 行，mkdir 在第 $_mk 行 —— 中间目录不存在，复制必失败"
+fi
+# 顺带确认失败时把 docker 的原始错误露出来，不然又只能靠猜
+grep -q 'cp.err' "$_pub" && ok "复制失败时露出 docker 的原始报错" \
+    || bad "复制失败了却吞掉 docker 的报错，只能靠猜"
+
 echo
 printf 'astronvim_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]
