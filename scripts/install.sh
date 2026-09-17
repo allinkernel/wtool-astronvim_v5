@@ -233,7 +233,54 @@ install_deps() {
 # 这里刻意不做"顺手帮你 build 一下"——install 要能在没网、没编译器的机器上跑，
 # 一旦它偷偷开始编译，这个前提就没了。缺什么就明确说什么。
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 把"旧布局"的产物搬到新布局来
+# --------------------------------------------------------------------------
+# 2026-09-17 之前，产物落在 $HOME/.local 和 $HOME/.config 下：
+#     .local/bin/nvim  .local/share/nvim  .local/lib/nvim
+#     .config/astronvim_v5   .local/share/astronvim_v5
+# 之后改成落在 $WTOOL_PREFIX（默认 ~/.wtool/usr）下，$HOME 里只留软链。
+#
+# **发布包还没按新布局重发**，所以 `wtool download` 拿到的仍是旧布局的包。
+# 与其让人卡在"缺 nvim 二进制"、或者为了这个重发一次 1.5 小时的版本，
+# 不如在这里认出来并搬过去 —— 反正文件就在旁边，搬一下是一瞬间的事。
+#
+# 这是**过渡期的兼容层**。等发布包重发之后，这段就没用了，
+# 但留着也无害（条件是"新布局没有 且 旧布局有"，正常情况下不会触发）。
+migrate_legacy_payload() {
+    [ -d "$PREFIX/bin" ] && [ -x "$PREFIX/bin/nvim" ] && return 0   # 已经是新布局
+    [ -x "$HOME_DIR/.local/bin/nvim" ] || return 0                  # 旧布局也没有，交给 require_build 报错
+
+    say "检测到旧布局的产物（安装位置改过），搬到 \$WTOOL_PREFIX 下"
+    [ "$DRY_RUN" = 1 ] && { step "[dry-run] 迁移旧布局 → $PREFIX"; return 0; }
+
+    mkdir -p -- "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/share" "$XDG_CONFIG_REAL"
+    # 逐个搬。用 mv 而不是 cp：旧位置留着副本只会让人搞不清哪份是"真的"。
+    for _pair in \
+        ".local/bin/nvim:$PREFIX/bin/nvim" \
+        ".local/share/nvim:$PREFIX/share/nvim" \
+        ".local/lib/nvim:$PREFIX/lib/nvim" \
+        ".config/astronvim_v5:$CONFIG_DIR" \
+        ".local/share/astronvim_v5:$DATA_DIR"
+    do
+        _src="$HOME_DIR/${_pair%%:*}"
+        _dst="${_pair#*:}"
+        [ -e "$_src" ] || continue
+        [ -e "$_dst" ] && continue          # 目标已有就不动
+        mkdir -p -- "$(dirname -- "$_dst")"
+        if mv -- "$_src" "$_dst" 2>/dev/null; then
+            step "迁移 ${_src#"$HOME_DIR"/} → ${_dst#"$HOME_DIR"/}"
+        else
+            warn "搬不动 $_src（跨设备？）—— 改用复制"
+            cp -a -- "$_src" "$_dst" && rm -rf -- "$_src" || warn "复制也失败: $_src"
+        fi
+    done
+    # 旧位置残留的空目录顺手清掉（只删空的，有东西就留着）
+    rmdir -- "$HOME_DIR/.local/bin" 2>/dev/null || true
+}
+
 require_build() {
+    migrate_legacy_payload
     _missing=""
     [ -x "$PREFIX/bin/nvim" ] || _missing="$_missing nvim二进制"
     [ -d "$DATA_DIR/lazy" ]   || _missing="$_missing lazy插件"
