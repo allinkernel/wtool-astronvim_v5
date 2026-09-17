@@ -83,7 +83,11 @@ fi
 [ -n "${TAG:-}" ] || die "取不到 $REPO 的 release 列表。显式指定即可：
     WTOOL_DL_TAG=snapshot-2026-09-16 wtool download astronvim_v5"
 say "发布页 : $REPO @ $TAG"
-say "下载源 : $DLBASE/$TAG"
+# 这行必须说真话。原来打的是 $DLBASE/$TAG（即 github.com/.../releases/download/...），
+# 但**下载根本不会走那个地址** —— 它走的是 api.github.com 的资产端点。
+# 而 github.com 在有些网络里整个不通，于是这行字看起来就像"卡在一个打不开的源上"，
+# 把人引去查网络，而真正该看的是下面那行资产表。
+say "下载经 : api.github.com/repos/$REPO/releases/assets/<id>（不经 github.com）"
 
 # 统一取文件：断点续传 + 重试。
 #
@@ -318,6 +322,15 @@ while IFS='	' read -r _name _sha _bytes; do
     printf '%s\t%s\t%s\t%s\n' "$_idx" "$_name" "$_sha" "$_bytes" >> "$CACHE/.todo.tsv"
 done < "$CACHE/.vols.tsv"
 
+# .todo.tsv 是**队列**，发出去一个就摘一行；
+# .want.tsv 是**清单**，一份不动，用来算总进度。
+#
+# 这两个必须分开。原来只有一个 .todo.tsv，而进度统计读的就是它 ——
+# 于是正在下载的那几个卷因为"已经出队"而不被计入，
+# 进度条**永远停在 0%**，看起来像卡死。用户照这个判断去查网络，
+# 完全是白费功夫。（这是我自己引入的 bug。）
+cp -f -- "$CACHE/.todo.tsv" "$CACHE/.want.tsv" 2>/dev/null || :
+
 if [ ! -s "$CACHE/.todo.tsv" ]; then
     say "  全部 $_nvol 个卷都已在本地，无需下载"
 else
@@ -350,7 +363,9 @@ else
     # 已经下到本地的字节数（用于汇总进度）
     _bytes_now() {
         # 第 2 列才是卷名（第 1 列是序号，第 3 列 sha，第 4 列字节数）
-        awk -F'\t' '{print $2}' "$CACHE/.todo.tsv" 2>/dev/null | while read -r _n; do
+        # 读 .want.tsv（不动的那份），别读队列 —— 出队的卷也在下载中，
+        # 漏掉它们就会一直显示 0%
+        awk -F'\t' '{print $2}' "$CACHE/.want.tsv" 2>/dev/null | while read -r _n; do
             stat -c%s "$CACHE/$_n" 2>/dev/null || echo 0
         done | awk '{s+=$1} END{print s+0}'
     }
@@ -437,7 +452,7 @@ else
 fi
 
 # 清掉这一轮的临时文件
-rm -f -- "$CACHE"/.log.* "$CACHE"/.pid.* "$CACHE"/.todo.tsv
+rm -f -- "$CACHE"/.log.* "$CACHE"/.pid.* "$CACHE"/.todo.tsv "$CACHE"/.want.tsv
 
 # --------------------------------------------------------------------------
 # 4. 按顺序拼回一个流，解开，铺到 $HOME
