@@ -481,13 +481,18 @@ rm -f -- "$OUT/$ASSET-vol"*
     | $_packer | split -b "$VOLUME_SIZE" -d -a 2 - "$OUT/$ASSET-vol" \
     || die "分卷失败"
 
-# install.sh 和 dist.json 是给"只能浏览器下载"的机器用的：
-# 少了它们，下载回来一堆分卷没人知道怎么铺
-# 自包含包里放的就是仓库里这两份脚本（不是另写一套）：
-# 公司那台机器下完解压，跑 ./download.sh --from=. 再 ./install.sh
-cp -f -- "$WTOOL_PUBLISH_ROOT/scripts/install.sh" "$OUT/install.sh"
-cp -f -- "$WTOOL_PUBLISH_ROOT/scripts/download.sh" "$OUT/download.sh" 2>/dev/null || true
-chmod +x -- "$OUT/install.sh" "$OUT/download.sh" 2>/dev/null || true
+# extract.sh + dist.json 是给"只能用浏览器下载"的机器用的：
+# 少了它们，下载回来一堆分卷没人知道怎么铺。
+#
+# **这里放的是 extract.sh，不是 install.sh。**
+# 原来放 install.sh，而它会校验目标系统（dist.json 里 target=ubuntu-20.04），
+# 于是在 22.04 上直接拒绝安装 —— 可 glibc 是单向兼容的，20.04 编的包
+# 在 22.04/24.04/26.04 上实测都能跑。那个检查挡住的全是本该能装的机器。
+#
+# 而且"装"本来就该由 wtool 负责（登记、软链、shell 集成、能卸载）。
+# 发布包只负责把文件铺到位，职责分开。
+cp -f -- "$WTOOL_PUBLISH_ROOT/scripts/extract.sh" "$OUT/extract.sh"
+chmod +x -- "$OUT/extract.sh" 2>/dev/null || true
 
 python3 - "$OUT" "$ASSET" "$TARGET" "$_comp" "$WTOOL_PUBLISH_TAG" \
         "$WTOOL_PUBLISH_DATE" "$WTOOL_PUBLISH_REPO" > "$OUT/dist.json" <<'PY'
@@ -513,9 +518,9 @@ dist = {
     "compression": comp,
     "volume_size": os.environ.get("VOLUME_SIZE", "32M"),
     "volumes": vols,
-    "install": {
-        "how": "把 install.sh、dist.json 和所有 -volNN 放在同一个目录，然后：bash install.sh",
-        "note": "install.sh 会校验目标系统和每个分卷的 sha256，不匹配会明确报错而不是装出个坏环境",
+    "extract": {
+        "how": "把 extract.sh、dist.json 和所有 -volNN 放在同一个目录，然后：sh extract.sh；再 wtool install editor/astronvim_v5",
+        "note": "extract.sh 只校验分卷的 sha256 然后铺到 $HOME，不检查系统版本 —— glibc 单向兼容，最老系统编的包新的都能跑",
     },
 }
 print(json.dumps(dist, indent=2, ensure_ascii=False))
