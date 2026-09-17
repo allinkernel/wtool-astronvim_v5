@@ -65,14 +65,30 @@ done
 # --------------------------------------------------------------------------
 HOME_DIR=${HOME:-/root}
 [ -n "$HOME_DIR" ] || die "HOME 没设置"
-PREFIX=${PREFIX:-$HOME_DIR/.local}
+PREFIX=${PREFIX:-${WTOOL_PREFIX:-$HOME_DIR/.wtool/usr}}
 JOBS=${JOBS:-$( (nproc 2>/dev/null || echo 4) )}
 XDG_CONFIG=${XDG_CONFIG_HOME:-$HOME_DIR/.config}
 XDG_DATA=${XDG_DATA_HOME:-$HOME_DIR/.local/share}
 XDG_STATE=${XDG_STATE_HOME:-$HOME_DIR/.local/state}
 
-CONFIG_DIR="$XDG_CONFIG/$APPNAME"
-DATA_DIR="$XDG_DATA/$APPNAME"
+# 真正的内容一律放 $WTOOL_PREFIX（默认 ~/.wtool/usr）下面 —— 这是 wtool 的契约，
+# 见 harness/notes/01-context.md §3.1。原来放 $HOME/.local 有两个后果：
+#   · `wtool uninstall` 撤不掉：东西不在 wtool 拥有的路径里，journal 里没有
+#   · 和用户、别的工具抢 ~/.local/bin、~/.config 这些公共目录
+#
+# nvim 二进制/运行时由 `make install --prefix=$PREFIX` 落到 $PREFIX/{bin,share,lib}；
+# 配置和插件数据放 $PREFIX/share/<app>/{config,data}。
+#
+# **$HOME 里只留软链**（见 install.sh 的 link_into_home）：软链是 wtool 管的、
+# 可撤销的，删掉不留痕。nvim 靠 NVIM_APPNAME 去 $XDG_CONFIG_HOME/$APPNAME
+# 和 $XDG_DATA_HOME/$APPNAME 找东西，软链正好把这两个点接过去。
+# 两个独立根，符合 XDG 语义：nvim 找的是
+#   $XDG_CONFIG_HOME/$APPNAME  和  $XDG_DATA_HOME/$APPNAME
+# 所以只要把 XDG_*_HOME 指到下面这两个目录，路径自然就对上了。
+XDG_CONFIG_REAL="$PREFIX/config"
+XDG_DATA_REAL="$PREFIX/share"
+CONFIG_DIR="$XDG_CONFIG_REAL/$APPNAME"
+DATA_DIR="$XDG_DATA_REAL/$APPNAME"
 STATE_DIR="$XDG_STATE/$APPNAME"
 MANIFEST="$STATE_DIR/install-manifest.tsv"
 
@@ -388,10 +404,10 @@ install_plugins() {
     else
         # 第一次跑会把 lazy.nvim 自己 clone 下来（init.lua 里做的事），
         # 所以先裸跑一次让引导完成，再 restore。
-        NVIM_APPNAME=$APPNAME "$PREFIX/bin/nvim" --headless -c 'qa!' >/dev/null 2>&1 || true
-        NVIM_APPNAME=$APPNAME "$PREFIX/bin/nvim" --headless \
+        NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless -c 'qa!' >/dev/null 2>&1 || true
+        NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
             -c 'Lazy! restore' -c 'qa!' >/dev/null 2>&1 || warn "Lazy restore 返回非 0（继续）"
-        NVIM_APPNAME=$APPNAME "$PREFIX/bin/nvim" --headless \
+        NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
             -c 'Lazy! restore' -c 'qa!' >/dev/null 2>&1 || true
     fi
     manifest_add payload ".local/share/$APPNAME"
@@ -438,7 +454,7 @@ registry.refresh(function()
   vim.cmd("qa!")
 end)
 LUA
-    NVIM_APPNAME=$APPNAME "$PREFIX/bin/nvim" --headless \
+    NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
         -c "luafile $STATE_DIR/.mason-install.lua" >/dev/null 2>&1 \
         || warn "mason 批量安装返回非 0（继续）"
     rm -f -- "$STATE_DIR/.mason-install.lua"
@@ -473,7 +489,7 @@ end
 ts.ensure_installed_sync(vim.split([[$_names]], "%s+"))
 vim.cmd("qa!")
 LUA
-    NVIM_APPNAME=$APPNAME "$PREFIX/bin/nvim" --headless \
+    NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
         -c "luafile $STATE_DIR/.ts-install.lua" >/dev/null 2>&1 \
         || warn "treesitter 安装返回非 0（单个 parser 失败不致命，继续）"
     rm -f -- "$STATE_DIR/.ts-install.lua"

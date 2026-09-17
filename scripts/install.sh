@@ -72,13 +72,30 @@ done
 # --------------------------------------------------------------------------
 HOME_DIR=${HOME:-/root}
 [ -n "$HOME_DIR" ] || die "HOME 没设置"
-PREFIX=${PREFIX:-$HOME_DIR/.local}
+PREFIX=${PREFIX:-${WTOOL_PREFIX:-$HOME_DIR/.wtool/usr}}
+JOBS=${JOBS:-$( (nproc 2>/dev/null || echo 4) )}
 XDG_CONFIG=${XDG_CONFIG_HOME:-$HOME_DIR/.config}
 XDG_DATA=${XDG_DATA_HOME:-$HOME_DIR/.local/share}
 XDG_STATE=${XDG_STATE_HOME:-$HOME_DIR/.local/state}
 
-CONFIG_DIR="$XDG_CONFIG/$APPNAME"
-DATA_DIR="$XDG_DATA/$APPNAME"
+# 真正的内容一律放 $WTOOL_PREFIX（默认 ~/.wtool/usr）下面 —— 这是 wtool 的契约，
+# 见 harness/notes/01-context.md §3.1。原来放 $HOME/.local 有两个后果：
+#   · `wtool uninstall` 撤不掉：东西不在 wtool 拥有的路径里，journal 里没有
+#   · 和用户、别的工具抢 ~/.local/bin、~/.config 这些公共目录
+#
+# nvim 二进制/运行时由 `make install --prefix=$PREFIX` 落到 $PREFIX/{bin,share,lib}；
+# 配置和插件数据放 $PREFIX/share/<app>/{config,data}。
+#
+# **$HOME 里只留软链**（见 install.sh 的 link_into_home）：软链是 wtool 管的、
+# 可撤销的，删掉不留痕。nvim 靠 NVIM_APPNAME 去 $XDG_CONFIG_HOME/$APPNAME
+# 和 $XDG_DATA_HOME/$APPNAME 找东西，软链正好把这两个点接过去。
+# 两个独立根，符合 XDG 语义：nvim 找的是
+#   $XDG_CONFIG_HOME/$APPNAME  和  $XDG_DATA_HOME/$APPNAME
+# 所以只要把 XDG_*_HOME 指到下面这两个目录，路径自然就对上了。
+XDG_CONFIG_REAL="$PREFIX/config"
+XDG_DATA_REAL="$PREFIX/share"
+CONFIG_DIR="$XDG_CONFIG_REAL/$APPNAME"
+DATA_DIR="$XDG_DATA_REAL/$APPNAME"
 STATE_DIR="$XDG_STATE/$APPNAME"
 MANIFEST="$STATE_DIR/install-manifest.tsv"
 
@@ -364,6 +381,16 @@ shell_block() {
 $MARK_BEGIN
 # 由 astronvim_v5/install.sh 写入。删掉这段就是卸载 shell 集成。
 export NVIM_APPNAME=$APPNAME
+# PATH 必须带进来。原来只写了 NVIM_APPNAME ——
+# 于是"装完了"，但新开的 shell 里敲 nvim 是 command not found，
+# 而 ~/.config、~/.local/share 里却能看到东西，看起来像装了一半。
+# 用 $PREFIX（安装时确定），不写死 ~/.wtool/usr：
+# 用户可以 --prefix= 换地方。
+case ":\$PATH:" in
+    *":$PREFIX/bin:"*) ;;
+    *) PATH="$PREFIX/bin:\$PATH" ;;
+esac
+export PATH
 $MARK_END
 EOF
 }
@@ -394,6 +421,47 @@ install_shell() {
         manifest_add shell "$(basename -- "$_rc")"
     done
 }
+
+# --------------------------------------------------------------------------
+# $HOME 里只放软链
+# --------------------------------------------------------------------------
+# 真正的内容在 $CONFIG_DIR / $DATA_DIR（都在 $WTOOL_PREFIX 下）。
+# nvim 靠 NVIM_APPNAME 去 $XDG_CONFIG_HOME/$APPNAME 和
+# $XDG_DATA_HOME/$APPNAME 找东西，所以在这两个点上放软链接过去。
+#
+# 为什么不是直接把实体放 $HOME：
+#   · 可撤销 —— 软链是 wtool 管的，删掉不留痕；实体撤起来要猜"这是谁放的"
+#   · 不打架 —— ~/.config、~/.local/share 是用户和别的工具共用的
+# 软链本身也登记成 payload，所以 --uninstall 会连它一起删。
+link_into_home() {
+    for _pair in "$XDG_CONFIG/$APPNAME:$CONFIG_DIR" "$XDG_DATA/$APPNAME:$DATA_DIR"; do
+        _link=${_pair%%:*}
+        _real=${_pair#*:}
+        [ -d "$_real" ] || continue
+        if [ "$DRY_RUN" = 1 ]; then step "[dry-run] 软链 $_link → $_real"; continue; fi
+        # 已经是对的软链就别动（幂等，也避免把 mtime 搞乱）
+        if [ -L "$_link" ] && [ "$(readlink -- "$_link")" = "$_real" ]; then
+            continue
+        fi
+        # 目标位置有**实体**（老版本装法留下的）→ 说明是从老布局迁移过来。
+        # 直接删有风险，所以先挪到一边并**大声说出来**，不静默丢用户数据。
+        if [ -e "$_link" ] && [ ! -L "$_link" ]; then
+            _bak="$_link.wtool-old.$$"
+            warn "$_link 是实体（老版本装的），挪到 $_bak 后改成软链"
+            mv -f -- "$_link" "$_bak" || die "挪不动 $_link"
+        fi
+        mkdir -p -- "$(dirname -- "$_link")"
+        ln -sfn -- "$_real" "$_link" || die "建软链失败: $_link"
+        step "软链 $_link → $_real"
+        # 登记成 payload，--uninstall 才会连软链一起删。
+        # 清单里的路径是**相对 $HOME** 的，所以要换算一下。
+        case $_link in
+            "$HOME_DIR"/*) manifest_add payload "${_link#"$HOME_DIR"/}" ;;
+            *) warn "软链 $_link 不在 \$HOME 下，不进清单（卸载时不会删）" ;;
+        esac
+    done
+}
+
 # --------------------------------------------------------------------------
 # 卸载：照清单逆着来
 # --------------------------------------------------------------------------
@@ -465,6 +533,11 @@ main() {
         manifest_touch
         require_build
     fi
+
+    # 产物已经在 $WTOOL_PREFIX 下了，这里在 $HOME 里接两个软链过去。
+    # 必须在 install_shell 之前：shell 块里的 PATH 指向 $PREFIX/bin，
+    # 得先保证那个目录真的有东西。
+    link_into_home
 
     install_shell
 
