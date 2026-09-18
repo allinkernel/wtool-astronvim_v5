@@ -1,19 +1,66 @@
 # astronvim_v5 需要的 mason 包清单
 #
-# 只留实际在用的五种语言的 LSP。原来是 75 个（2.7G），减到 5 个（约 400M）——
-# 那 75 个是历次 :Mason 浏览时顺手装的，绝大多数语言根本用不到。
+# 格式：一行一个 mason 包名（就是 `registry.get_package(name)` 认的名字，
+# 也就是 :Mason 列表里显示的那个）。注释必须**整行**写，`#` 必须在第 1 列。
+# build.sh 是用 `grep -v '^#' | tr '\n' ' '` 读这个文件的，它**不剥行尾注释** ——
+# 写成 `clangd  # 说明` 会让 "#" 和 "说明" 被当成两个包名，然后报"不在注册表"。
 #
-# 关键事实：这五个**全部是预编译包，一个都不用编**（除了 gopls mason 选了
-# go install，但它官方也有预编译 release）。来源见 mason 注册表：
-#   clangd        pkg:github/clangd/clangd           → clangd-linux-*.zip
-#   pyright       pkg:npm/pyright                    → npm 包
-#   rust-analyzer pkg:github/rust-lang/rust-analyzer → rust-analyzer-x86_64-unknown-linux-gnu.gz
-#   gopls         pkg:golang/golang.org/x/tools/gopls
-#   bash-language-server  pkg:npm/bash-language-server
+# 判断依据：**配置里实际引用了什么**，不是"可能想要什么"。每个包都要能指到
+# 配置里的一行（下面逐个写了出处）。反过来，配置引用到的就必须在这里 ——
+# 少了的表现是每次启动都刷
+#     mason-tool-installer: xxx: installing
+# 而且永远装不完（mason-tool-installer 每启动一次重试一次）。
 #
-# 加语言怎么办：见 editor/astronvim_v5/lang/ 下的语言包，别往这里堆。
+# 这里曾经被砍到只剩 5 个 LSP，而配置仍然引用 stylua / selene / codelldb /
+# lua-language-server —— 那 4 个就是上面那个症状的来源。
+# 砍清单不是"省事"，是把配置里已经写死的依赖砍断了。
+#
+# 加语言 = 同时改两个文件，缺一个就是半截：
+#   · mason-packages.txt       （语言服务器 / 格式化器 / linter / 调试器）
+#   · treesitter-parsers.txt   （语法高亮用的 parser）
+# 注意：没有 editor/astronvim_v5/lang/ 这个目录，别照着老注释去那里找。
+#
+# 全部是预编译产物，没有一个需要本地编译：
+#   clangd               pkg:github/clangd/clangd            → clangd-linux-*.zip
+#   pyright              pkg:npm/pyright
+#   rust-analyzer        pkg:github/rust-lang/rust-analyzer  → *-x86_64-unknown-linux-gnu.gz
+#   gopls                pkg:golang/golang.org/x/tools/gopls
+#   bash-language-server pkg:npm/bash-language-server
+#   lua-language-server  pkg:github/LuaLS/lua-language-server
+#   stylua               pkg:github/JohnnyMorganz/StyLua
+#   selene               pkg:github/Kampfkarren/selene
+#   codelldb             pkg:github/vadimcn/vscode-lldb
+
+# —— LSP server ——
+# 出处：astronvim_v5_config/lua/plugins/astrolsp.lua 的 `servers` 表
+# （名字是 lspconfig 的 server 名，≠ mason 的包名，下面逐个对上）
 clangd
 pyright
 rust-analyzer
 gopls
 bash-language-server
+# 出处：astrocommunity.pack.lua → mason-lspconfig opts 里
+# `opts.ensure_installed = list_insert_unique(..., { "lua_ls" })`，
+# 以及 mason-tool-installer 里的 "lua-language-server"。
+# astrolsp 的 servers 表里没有它，但 pack 会把它装出来并启用。
+lua-language-server
+
+# —— formatter / linter ——
+# 出处：astrocommunity.pack.lua →
+#   mason-tool-installer opts.ensure_installed { "stylua", "selene" }
+#   mason-null-ls         opts.ensure_installed { "stylua", "selene" }
+#   conform.nvim          formatters_by_ft.lua = { "stylua" }
+#   nvim-lint             linters_by_ft.lua    = { "selene" }
+stylua
+selene
+
+# —— DAP adapter（调试器）——
+# 出处：astrocommunity.pack.cpp →
+#   mason-nvim-dap       opts.ensure_installed { "codelldb" }
+#   mason-tool-installer opts.ensure_installed { "codelldb" }
+# 只有 C/C++ 这一个 adapter 是配置里写了的。Python/Go/Bash 的 adapter
+# （debugpy / go-debug-adapter / bash-debug-adapter，注册表里都有）**没有被
+# 任何配置引用**，所以不往这里加 —— 要加就先在配置里把它挂上
+# （mason-nvim-dap 的 ensure_installed 或 :DapInstall），否则又是一个
+# "清单里有、配置里没有" 的反向不一致。
+codelldb

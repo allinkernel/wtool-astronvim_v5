@@ -193,6 +193,55 @@ install_deps() {
         die "构建依赖没装上，无法继续：$*"
     }
 
+    # Go 工具链：见下面调用处的说明。放这里只是为了在调用点之前定义。
+    # 返回 0 = 可用；只在 --no-deps 或非 Linux 上跳过。
+    _go_prepare() {
+        _go_ver=${WTOOL_GO_VERSION:-go1.27.1}
+        _go_root=$HOME_DIR/.cache/astronvim_v5/go
+
+        # 已经有对的版本就不动（重跑构建时省一次 70M 下载）
+        if [ -x "$_go_root/bin/go" ] &&
+           "$_go_root/bin/go" version 2>/dev/null | grep -q "${_go_ver#go}"; then
+            step "Go 工具链已就位: $("$_go_root/bin/go" version 2>/dev/null)"
+            export PATH="$_go_root/bin:$PATH"
+            return 0
+        fi
+
+        case $(uname -m) in
+            x86_64|amd64)  _go_arch=amd64 ;;
+            aarch64|arm64) _go_arch=arm64 ;;
+            *) warn "不认识的架构 $(uname -m)，跳过 Go（gopls 会装不上）"; return 1 ;;
+        esac
+
+        if [ "$DRY_RUN" = 1 ]; then
+            step "[dry-run] 下 $_go_ver.linux-$_go_arch.tar.gz 到 $_go_root（只为装 gopls，不进发布包）"
+            return 0
+        fi
+
+        _go_tgz=$HOME_DIR/.cache/astronvim_v5/$_go_ver.linux-$_go_arch.tar.gz
+        mkdir -p -- "$HOME_DIR/.cache/astronvim_v5"
+        step "下 Go 工具链 $_go_ver（只为装 gopls；放缓存目录，不进发布包）"
+        if ! curl -fL --connect-timeout 30 --retry 2 --retry-delay 5 \
+                 -o "$_go_tgz" "https://go.dev/dl/$_go_ver.linux-$_go_arch.tar.gz"; then
+            warn "Go 下载失败（网络/proxy？）—— gopls 这轮装不上"
+            return 1
+        fi
+        # 解到临时目录再原子换过去，避免半截解压被下次构建当成"已就位"
+        rm -rf -- "$_go_root.tmp"
+        mkdir -p -- "$_go_root.tmp"
+        if ! tar -C "$_go_root.tmp" --strip-components=1 -xzf "$_go_tgz"; then
+            warn "Go 解压失败: $_go_tgz"
+            rm -rf -- "$_go_root.tmp"
+            return 1
+        fi
+        rm -rf -- "$_go_root"
+        mv -- "$_go_root.tmp" "$_go_root"
+        rm -f -- "$_go_tgz"
+        export PATH="$_go_root/bin:$PATH"
+        step "Go 工具链就位: $("$_go_root/bin/go" version 2>/dev/null)"
+        return 0
+    }
+
     # 换源退路：宿主代理走 archive.ubuntu.com / security.ubuntu.com 经常 502
     # （实测只有 171 kB/s，还会整批失败）。第一轮失败就换国内镜像重来。
     _apt_mirror=${WTOOL_APT_MIRROR:-http://mirrors.ustc.edu.cn/ubuntu}
@@ -277,6 +326,27 @@ EOF
     _apt git python3 python3-pip python3-venv nodejs npm ripgrep fd-find
     # 编译 treesitter parser 要用到 C/C++ 编译器（build-essential 里有了）
 
+    # ----------------------------------------------------------------------
+    # Go 工具链：**只给 mason 装 gopls 用**，不进发布包
+    #
+    # 为什么不能靠 apt 的 golang-go：mason registry 里 gopls 的 source 是
+    #     pkg:golang/golang.org/x/tools/gopls@v0.23.0
+    # 也就是靠 `go install` 现场编。而发行版自带的 Go 版本是绑在发行版上的：
+    # focal 1.13 / jammy 1.18 / noble 1.22 —— 都太老，`go install` 直接失败。
+    # 失败长这样（实测，只出现在 mason.log 里，构建日志只有一句"1 个包装失败"）：
+    #     Installation failed for Package(name=gopls)
+    #     error=Could not find executable "go" in PATH.
+    # 结果就是发布包里**没有 gopls**，而配置的 astrolsp.servers 里写着 gopls ——
+    # 装完的编辑器 Go 文件没有 LSP，而且内网机器再也补不上。
+    # 所以这里自己下官方 tarball，版本钉死。
+    #
+    # 为什么放 $HOME/.cache 而不是 $PREFIX：$PREFIX 下的东西会被 publish 打进
+    # release。Go 只在**构建机**上有用，真正需要分发的是它编出来的 gopls 二进制
+    # （已经落在 mason/packages 里了）。放缓存目录 = 天然不进包。
+    # ----------------------------------------------------------------------
+    # 失败不致命：gopls 会在 install_mason 那一步报出来（那里现在是硬失败），
+    # 所以"没有 Go"会以"gopls 装不上"的形式死在构建末尾，而不是静默少一个包。
+    _go_prepare || warn "Go 工具链不可用，gopls 这轮会装不上"
     # Debian/Ubuntu 把 fd 装成 fdfind，但 astronvim 找的是 fd
     if have fdfind && ! have fd; then
         if [ "$DRY_RUN" = 1 ]; then
@@ -426,11 +496,18 @@ install_mason() {
 
     if [ "$DRY_RUN" = 1 ]; then step "[dry-run] MasonInstall $_n 个包"; return 0; fi
 
+    rm -f -- "$STATE_DIR/mason-failed.txt"
+
     # mason 的安装是异步的：直接 MasonInstall + qa 会在装完前退出。
     # 所以自己拿 registry 循环等，全部装完（或失败）才退出。
-    cat > "$STATE_DIR/.mason-install.lua" <<LUA
+    #
+    # 装哪些由参数决定（$1 为空 = 清单里的全部）。之所以要能只装一部分：
+    # 网络抖一下之后只需要补装失败的那几个，不用把装好的几百兆重下一遍。
+    _mason_install() {
+        _want="$1"
+        cat > "$STATE_DIR/.mason-install.lua" <<LUA
 local registry = require("mason-registry")
-local want = vim.split([[$_names]], "%s+")
+local want = vim.split([[$_want]], "%s+")
 local pending, failed = 0, {}
 registry.refresh(function()
   for _, name in ipairs(want) do
@@ -454,15 +531,40 @@ registry.refresh(function()
   vim.cmd("qa!")
 end)
 LUA
-    NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
-        -c "luafile $STATE_DIR/.mason-install.lua" >/dev/null 2>&1 \
-        || warn "mason 批量安装返回非 0（继续）"
-    rm -f -- "$STATE_DIR/.mason-install.lua"
+        NVIM_APPNAME=$APPNAME XDG_CONFIG_HOME=$XDG_CONFIG_REAL XDG_DATA_HOME=$XDG_DATA_REAL "$PREFIX/bin/nvim" --headless \
+            -c "luafile $STATE_DIR/.mason-install.lua" >/dev/null 2>&1 \
+            || warn "mason 批量安装返回非 0（继续）"
+        rm -f -- "$STATE_DIR/.mason-install.lua"
+    }
 
+    _mason_install "$_names"
+
+    # 有失败的先补一轮 —— 单次网络抖动不该让整个构建白跑。
+    if [ -f "$STATE_DIR/mason-failed.txt" ]; then
+        _retry=$(grep -v '(不在注册表)' "$STATE_DIR/mason-failed.txt" | tr '\n' ' ' || true)
+        if [ -n "$(printf '%s' "$_retry" | tr -d ' ')" ]; then
+            warn "这几个包第一次没装上，10 秒后补一轮: $_retry"
+            sleep 10
+            rm -f -- "$STATE_DIR/mason-failed.txt"
+            _mason_install "$_retry"
+        fi
+    fi
+
+    # 还是失败就**硬失败**，不能继续。
+    #
+    # 这里原来是 warn + 继续，结果是：gopls 因为构建机没有 Go 一直装不上，
+    # 构建日志里只有一句容易被忽略的"1 个 mason 包装失败"，发布包里就是没有
+    # gopls，而配置的 astrolsp.servers 里写着它 —— 装到内网机器上之后再也补不上。
+    # 包清单存在的全部意义就是"发布出去的东西是完整的"，缺一个就不该出包。
     if [ -f "$STATE_DIR/mason-failed.txt" ]; then
         _nf=$(grep -c . "$STATE_DIR/mason-failed.txt" || true)
-        warn "$_nf 个 mason 包装失败（清单见 $STATE_DIR/mason-failed.txt，不影响其余的）"
+        warn "$_nf 个 mason 包装失败："
+        sed 's/^/    /' "$STATE_DIR/mason-failed.txt" >&2
+        die "mason 清单没装全，发布包会缺工具。修好网络（或看上面是不是缺构建期依赖）后重跑构建。
+     注意重跑会把 nvim 重编一遍（build_nvim 每次都重铺源码树，约十几分钟），
+     但已经装好的 mason 包会跳过。"
     fi
+    say "  $_n 个包全部就位"
 }
 # --------------------------------------------------------------------------
 # install_treesitter

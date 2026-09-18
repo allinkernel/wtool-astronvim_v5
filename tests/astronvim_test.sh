@@ -213,6 +213,66 @@ else
     fi
 fi
 
+# 9b 只看得见 astrolsp.lua 的 servers 表。**真正的坑在那张表之外**：
+# astrocommunity 的 pack 会往 mason-tool-installer / mason-lspconfig /
+# mason-nvim-dap 的 ensure_installed 里塞东西（lua-language-server / stylua /
+# selene / codelldb…），这些名字在 astrolsp.lua 里一个字都搜不到。
+# 上次有人把 mason 清单从 75 砍到 5，只保住了 LSP，正是这批包被连带砍掉，
+# 而 9b 全绿 —— 于是每次启动都刷 "mason-tool-installer: xxx: installing"。
+#
+# "某个 pack 要哪些 mason 包" 脚本推不出来（得读 astrocommunity 的源码），
+# 所以这里把映射**显式写下来**。config 里 import 了表里没有的 pack 就算失败，
+# 逼加的人把映射补上 —— 宁可这里红一次，也不要用户那边每次启动都红。
+echo "== 9c. astrocommunity 的 pack 要的 mason 包也得在清单里 =="
+_pack_needs() {
+    case $1 in
+        astrocommunity.pack.lua) echo "lua-language-server stylua selene" ;;
+        astrocommunity.pack.cpp) echo "clangd codelldb" ;;
+        *) echo "" ;;
+    esac
+}
+# 收集 config 里所有 `{ import = "astrocommunity.xxx" }`。
+# 必须锚在 `import =` 上：注释里也会出现 astrocommunity.xxx 这种字样，
+# 不锚的话会把说明文字当成 import 去查表，然后误报"表里没有"。
+_imports=$(cat "$proj/astronvim_v5_config/lua/community.lua" \
+               "$proj"/astronvim_v5_config/lua/plugins/*.lua 2>/dev/null |
+           grep -oE 'import *= *"astrocommunity\.[a-z0-9.-]+"' |
+           grep -oE 'astrocommunity\.[a-z0-9.-]+' | sort -u)
+if [ -z "$_imports" ]; then
+    bad "在 config 里找不到任何 astrocommunity 的 import"
+else
+    _unknown=""
+    _checked=0
+    _bad=0
+    for _mod in $_imports; do
+        case $_mod in
+            astrocommunity.pack.*) ;;
+            *) continue ;;   # debugging/* 这类模块不装 mason 包
+        esac
+        _needs=$(_pack_needs "$_mod")
+        if [ -z "$_needs" ]; then
+            _unknown="$_unknown $_mod"
+            continue
+        fi
+        _checked=$((_checked + 1))
+        for _p in $_needs; do
+            if ! grep -vE '^[[:space:]]*(#|$)' "$proj/mason-packages.txt" |
+                 tr -d '_-' | tr 'A-Z' 'a-z' | grep -qx -- "$(printf '%s' "$_p" | tr -d '_-' | tr 'A-Z' 'a-z')"; then
+                bad "pack $_mod 要 $_p，但 mason-packages.txt 里没有它"
+                _bad=$((_bad + 1))
+            fi
+        done
+    done
+    # 只有一条都没错才报 ok。否则"FAIL …"下面紧跟一句"ok N 个 pack 都在清单里"，
+    # 自相矛盾，看日志的人会以为失败是别的环节引起的。
+    if [ "$_bad" = 0 ] && [ -z "$_unknown" ]; then
+        ok "$_checked 个 astrocommunity pack 的 mason 依赖都在清单里"
+    fi
+    if [ -n "$_unknown" ]; then
+        bad "config import 了这些 pack，但本测试的表里没写它们要哪些 mason 包:$_unknown"
+    fi
+fi
+
 _ft=$(grep -vE '^\s*(#|$)' "$proj/treesitter-parsers.txt" | sort -u)
 if [ -n "$_ft" ]; then
     ok "treesitter 清单 $(printf '%s\n' "$_ft" | wc -l | tr -d ' ') 个 parser"

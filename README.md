@@ -11,10 +11,10 @@ editor/astronvim_v5/                     ← 本仓：构建/发布逻辑（有 
 ├── install.sh                           安装器
 ├── publish.sh                           打包器
 ├── wtool.xml                            publish 声明
-├── mason-packages.txt                   75 个 mason 包（tools/snapshot.sh 生成）
-├── treesitter-parsers.txt               251 个 parser（同上）
-├── mason-versions.json                  本机版本快照（仅供比对）
-└── tools/snapshot.sh                    从实机重新抓上面三份清单
+├── mason-packages.txt                   9 个 mason 包（按 config 的实际引用手写维护）
+├── treesitter-parsers.txt               15 个 parser（同上）
+├── mason-versions.json                  某台机器上的版本快照（仅供比对，构建不读它）
+└── tools/snapshot.sh                    从实机重新抓上面三份清单（**慎用**，见「可复现性」）
 ```
 
 `nvim/` 和 `astronvim_v5_config/` 由 repo manifest 单独管理，本仓的 `.gitignore` 把它们排除了。
@@ -75,8 +75,8 @@ nvim 是半静态链接，`ldd` 出来只剩 `libc`、`libm`、`libgcc_s`——*
 |---|---|---|
 | nvim 二进制 | ✅ | 编译慢，且只依赖 glibc |
 | `~/.config/astronvim_v5` | ✅ | 配置仓 |
-| `~/.local/share/astronvim_v5/lazy` | ✅ | 56 个插件，含 251 个 treesitter `.so` 和 blink 的 Rust 库 |
-| `~/.local/share/astronvim_v5/mason` | ✅ | 75 个包，2.7G，公司机器下不动 |
+| `~/.local/share/astronvim_v5/lazy` | ✅ | 56 个插件，含 `treesitter-parsers.txt` 里那些 `.so` 和 blink 的 Rust 库 |
+| `~/.local/share/astronvim_v5/mason` | ✅ | 9 个包，公司机器下不动 |
 | apt 装的系统依赖 | ❌ | **必须和本机 libc/发行版匹配**，带过去也不能用，只能目标机现场装 |
 | `~/.local/state/.../log` | ❌ | 本机上是 8.2G 的调试日志 |
 
@@ -86,15 +86,29 @@ nvim 是半静态链接，`ldd` 出来只剩 `libc`、`libm`、`libgcc_s`——*
 |---|---|
 | 56 个 lazy 插件 | `lazy-lock.json` 钉到 commit ✅ |
 | nvim 源码 | manifest 的 revision ✅ |
-| 75 个 mason 包 | **只能固定"装哪些"**——mason 没有版本锁定机制（没有 `mason-lock.json`，`Package:install` 不收 version，`:MasonInstall` 不支持 `pkg@version`）。装到什么版本由打包那一刻决定，记进 release 里的 `versions.txt` 供比对 |
-| 251 个 treesitter parser | 同上，且 `.so` 是本地编译的，**不能跨机器直接复制**，换机器必须重编 |
+| mason 包 | **只能固定"装哪些"**——mason 没有版本锁定机制（没有 `mason-lock.json`，`Package:install` 不收 version，`:MasonInstall` 不支持 `pkg@version`）。装到什么版本由打包那一刻决定，记进 release 里的 `versions.txt` 供比对 |
+| treesitter parser | 同上，且 `.so` 是本地编译的，**不能跨机器直接复制**，换机器必须重编 |
 
-`mason-packages.txt` 和 `treesitter-parsers.txt` 都是从实机抓的：config 里 `lua/plugins/mason.lua` 和 `lua/plugins/treesitter.lua` 都是关着的（`if true then return {} end`），这 75 + 251 个是历次手动装出来的，**在 git 里、在 config 里都推不出来**。改了环境就重跑 `tools/snapshot.sh`。
+两份清单是**从配置推出来的**，不是从实机抓的。规则只有一条：
+
+> 配置里引用到的工具必须在这两份清单里；清单里的每个包也必须能在配置里指到出处。
+
+`mason-packages.txt` 的每个包都在文件里写了出处（哪一行 `ensure_installed` / 哪个
+`servers` 条目）；`treesitter-parsers.txt` 对应各 pack 的 `ensure_installed`。
+两边都要跟着 `astronvim_v5_config/` 走。
+
+`tools/snapshot.sh` 走的是**反方向**（从一台装好的机器反推清单），它曾经抓出
+75 个 mason 包 + 251 个 parser —— 那是历次 `:Mason` 浏览顺手装的，绝大部分
+config 里根本没有引用。后来有人把 mason 清单砍到 5 个，却只砍了 LSP，
+`stylua` / `selene` / `codelldb` / `lua-language-server` 被连带砍掉，
+而配置仍然引用它们，于是每次启动都刷 `mason-tool-installer: xxx: installing`。
+
+**所以：要改清单，先改配置，再从配置推清单。别用 snapshot.sh 覆盖它。**
 
 ## 测试
 
 ```sh
-tests/astronvim_test.sh     # 39 条：deploy/校验/拒绝坏包/可重入/卸载
+tests/astronvim_test.sh     # 52 条：deploy/校验/拒绝坏包/可重入/卸载/清单与配置一致
 ```
 
 docker 那条路（build）在 agent 环境里测不了（用不了 docker socket），只能人在自己机器上跑 `publish.sh` 验证。
